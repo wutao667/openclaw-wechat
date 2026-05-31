@@ -1,7 +1,8 @@
 import { DEFAULT_ACCOUNT_ID, DEFAULT_PLUGIN_ID, DEFAULT_SERVER_URL } from "./const.js";
 
 export function resolveWebChatConfig(cfg) {
-  return cfg.channels?.webchat || {};
+  if (!cfg || !cfg.channels) return {};
+  return cfg.channels.webchat || {};
 }
 
 export function listWebChatAccountIds(_cfg) {

@@ -1,3 +1,6 @@
+import fs from "fs";
+import path from "path";
+import os from "os";
 import { WebSocket } from "ws";
 import { CHANNEL_ID } from "./const.js";
 
@@ -9,7 +12,19 @@ let state = {
   heartbeatTimer: null,
   reconnectAttempts: 0,
   intentionalClose: false,
+  fullCfg: {},
 };
+
+function loadGatewayConfig() {
+  try {
+    const configPath = path.resolve(os.homedir(), ".openclaw/openclaw.json");
+    const content = fs.readFileSync(configPath, "utf8");
+    return JSON.parse(content);
+  } catch (err) {
+    console.warn("[webchat] could not load gateway config:", err.message);
+    return {};
+  }
+}
 
 function clearReconnectTimer() {
   if (state.reconnectTimer) {
@@ -115,6 +130,7 @@ function connectWebSocket() {
 export function startWebChatWsClient(runtime, account) {
   state.runtime = runtime;
   state.account = account;
+  state.fullCfg = loadGatewayConfig();
   state.intentionalClose = false;
   connectWebSocket();
 }
@@ -169,7 +185,7 @@ async function dispatchIncoming(message) {
   const agentId = String(message.agentId || "");
   const conversationId = String(message.conversationId || userId);
   const acc = state.account;
-  const cfg = {};
+  const cfg = state.fullCfg || {};
 
   const route = core.channel.routing.resolveAgentRoute({
     cfg,
