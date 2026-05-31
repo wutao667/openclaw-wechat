@@ -63,7 +63,10 @@ Chat Server 启动后：
 在每台要接入的 **OpenClaw Gateway 机器** 上操作。
 
 ```bash
-# 本地安装（link 模式，开发用）
+# 方式一：通过 npm 源安装（推荐）
+openclaw plugins install openclaw-wechat-plugin
+
+# 方式二：本地安装（link 模式，开发用）
 openclaw plugins install path:/path/to/webchat3.0/plugin
 
 # 查看安装状态
