@@ -1,6 +1,7 @@
 {
   "name": "openclaw-webchat-plugin",
-  "version": "0.1.0",
+  "version": "0.1.1",
+  "description": "WebChat channel plugin for OpenClaw — browser chat via WebSocket, no third-party IM needed",
   "type": "module",
   "main": "index.js",
   "dependencies": {
@@ -19,5 +20,17 @@
       "selectionLabel": "WebChat",
       "blurb": "Browser chat channel for OpenClaw"
     }
-  }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wutao667/openclaw-wechat.git"
+  },
+  "keywords": [
+    "openclaw",
+    "webchat",
+    "chat",
+    "channel",
+    "plugin"
+  ]
 }

@@ -17,7 +17,13 @@ openclaw plugins install openclaw-webchat-plugin
 
 ### 1. Deploy the Chat Server
 
-On any machine with a public IP (or reachable from both browser and plugin), clone the [repo](https://github.com/wutao667/openclaw-wechat) and run:
+On any machine with a public IP (or reachable from both browser and plugin):
+
+```bash
+npx openclaw-webchat-server
+```
+
+Or clone the [repo](https://github.com/wutao667/openclaw-wechat) and run locally:
 
 ```bash
 git clone https://github.com/wutao667/openclaw-wechat.git

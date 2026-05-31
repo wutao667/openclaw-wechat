@@ -45,8 +45,12 @@ webchat3.0/
 Chat Server 需要有**公网 IP**（或内网穿透），浏览器和 Plugin 都通过它中转。
 
 ```bash
-# 在有公网的机器上
-git clone <repo-url> && cd webchat3.0/server
+# 方式一：通过 npx 一键启动（推荐）
+npx openclaw-webchat-server
+
+# 方式二：克隆仓库手动运行
+git clone https://github.com/wutao667/openclaw-wechat.git
+cd openclaw-wechat/server
 npm install
 PORT=3100 node server.js
 ```
