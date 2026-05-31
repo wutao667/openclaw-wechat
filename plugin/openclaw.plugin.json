@@ -1,0 +1,38 @@
+{
+  "id": "webchat-openclaw-plugin",
+  "kind": "channel",
+  "channels": ["webchat"],
+  "name": "WebChat",
+  "description": "Browser-based WebChat channel for OpenClaw",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "channelConfigs": {
+    "webchat": {
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "serverUrl": { "type": "string", "description": "Chat Server WebSocket URL" },
+          "pluginId": { "type": "string" },
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "agentId": { "type": "string" },
+                "name": { "type": "string" }
+              },
+              "required": ["agentId"]
+            }
+          },
+          "allowFrom": { "type": "array", "items": { "type": "string" } },
+          "dmPolicy": { "type": "string", "enum": ["open", "allowlist", "pairing"] }
+        }
+      }
+    }
+  }
+}

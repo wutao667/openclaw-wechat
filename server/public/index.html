@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebChat</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="screen-login" class="screen active">
+    <div class="login-container">
+      <h1>WebChat</h1>
+      <div class="input-group">
+        <label for="username-input">用户名</label>
+        <input type="text" id="username-input" placeholder="输入你的用户名" autofocus>
+      </div>
+      <button id="login-btn">进入聊天</button>
+    </div>
+  </div>
+
+  <div id="screen-agents" class="screen">
+    <div class="sidebar-header">
+      <span class="user-badge" id="current-user"></span>
+      <button id="logout-btn">退出</button>
+    </div>
+    <div id="agent-list" class="agent-list">
+      <!-- Agent cards rendered by JS -->
+    </div>
+  </div>
+
+  <div id="screen-chat" class="screen">
+    <div class="chat-header">
+      <button id="back-btn" aria-label="返回 Agent 列表">←</button>
+      <div class="chat-agent-info">
+        <span class="agent-avatar" id="chat-agent-avatar"></span>
+        <span id="chat-agent-name"></span>
+      </div>
+    </div>
+    <div id="message-list" class="message-list">
+      <!-- Messages rendered by JS -->
+    </div>
+    <div class="chat-input-area">
+      <input type="text" id="message-input" placeholder="输入消息..." autofocus>
+      <button id="send-btn">发送</button>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
