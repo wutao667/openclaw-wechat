@@ -1,8 +1,7 @@
 {
-  "name": "@local/webchat-openclaw-plugin",
-  "version": "0.1.0",
+  "name": "openclaw-wechat-plugin",
+  "version": "0.1.1",
   "type": "module",
-  "private": true,
   "main": "index.js",
   "dependencies": {
     "ws": "^8.18.0"
@@ -11,16 +10,14 @@
     "openclaw": ">=2026.3.28"
   },
   "openclaw": {
-    "extensions": ["./index.js"],
+    "extensions": [
+      "./index.js"
+    ],
     "channel": {
       "id": "webchat",
       "label": "WebChat",
       "selectionLabel": "WebChat",
       "blurb": "Browser chat channel for OpenClaw"
-    },
-    "install": {
-      "localPath": "plugin",
-      "defaultChoice": "local"
     }
   }
 }
