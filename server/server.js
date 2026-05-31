@@ -72,7 +72,8 @@ server.on('upgrade', (req, socket, head) => {
   socket.destroy();
 });
 
-browserWss.on('connection', (ws) => {
+browserWss.on("connection", (ws) => {
+  console.log("browser connected");
   initHeartbeat(ws);
 
   ws.on('pong', () => markPong(ws));
@@ -93,7 +94,8 @@ browserWss.on('connection', (ws) => {
   ws.on('close', () => removeBrowser(ws));
 });
 
-pluginWss.on('connection', (ws) => {
+pluginWss.on("connection", (ws) => {
+  console.log("plugin connected");
   initHeartbeat(ws);
 
   ws.on('pong', () => markPong(ws));
@@ -165,6 +167,7 @@ function serveStatic(pathname, res) {
 }
 
 function registerBrowser(ws, message) {
+  console.log("registering browser:", message.userId);
   const userId = typeof message.userId === 'string' && message.userId.trim() ? message.userId : null;
   const userName = typeof message.userName === 'string' && message.userName.trim() ? message.userName : userId;
 
@@ -190,6 +193,7 @@ function registerBrowser(ws, message) {
 }
 
 function registerPlugin(ws, message) {
+  console.log("registering plugin:", message.pluginId);
   const pluginId = typeof message.pluginId === 'string' && message.pluginId.trim() ? message.pluginId : null;
   const agents = Array.isArray(message.agents)
     ? message.agents
