@@ -12,7 +12,7 @@ WebChat 是一个 **OpenClaw Channel Plugin**，对标飞书和企微 channel，
 
 ### 问题：agentId 全局冲突
 
-当前设计在 Chat Server 侧用 `agentId` 作为路由标识，所有 Plugin 实例共用一个全局 `plugins: Map<appId, ws>`（Server 层不再用 agentId 路由）。当两个 OpenClaw 实例都以 `agentId: "main"` 注册时，后者覆盖前者的记录，导致消息路由错乱。
+V1 设计在 Chat Server 侧用 `agentId` 作为路由标识，所有 Plugin 实例共用一个全局 agent 路由表。当两个 OpenClaw 实例都以 `agentId: "main"` 注册时，后者覆盖前者的记录，导致消息路由错乱。
 
 ### 变更概述
 
@@ -31,15 +31,17 @@ V2：Plugin 注册 { appId, secret } → Server 按 appId 路由。Server 和 Br
 
 ### 核心概念
 
-**App（应用实例）**
-- 一个 App 代表一个 OpenClaw Gateway 部署（Plugin 实例）
-- 每个 App = 一个 Agent 身份，有唯一 `appId`（Server 分配）和 `secret`（预共享密钥）
+**App（Agent 外部身份）**
+- 一个 App 代表 Chat Server 上一个可被外部访问的 Agent 身份；App 不是 OpenClaw Gateway 部署，也不是 Plugin 实例
+- 每个 App 有唯一 `appId`（Server 分配）和 `secret`（预共享密钥，Server 只保存 `secretHash`，不保存 secret 原文）
 - App 在 Server 端注册，Server 按 `appId` 路由消息
+- 一个 OpenClaw Gateway 可以配置多个 Account，对应 Chat Server 上多个 App
 
 **Account（通道账号）**
 - Plugin 侧配置，对标飞书 `channels.feishu.accounts`
 - 每个 Account 绑定 Server 端一个 App（通过 `appId` + `secret`），App = Agent 身份
-- 通过 Gateway 全局 `bindings[]` 将 accountId 映射到 agentId
+- 每个 Account 建立一条到 Chat Server 的 WebSocket 连接；Gateway 有 3 个 Account 就打开 3 条 WS 连接，每条连接注册一个 `appId`
+- 通过 Gateway 全局 `bindings[]` 将 `{channel, accountId}` 映射到 `agentId`
 
 ---
 
@@ -114,7 +116,7 @@ Plugin 启动时：
 2. 发送注册消息：{
      type: "register",
      appId: "wch_abc123",        // Server 预分配的唯一 ID，一个 appId = 一个 Agent
-     secret: "sk-xxx"            // 预共享密钥
+     secret: "sk-xxx"            // 预共享密钥，Server 仅用来校验 secretHash
    }
 3. Server 验证 appId + secret：
    - 通过 → { type: "registered", ok: true, appId: "wch_abc123" }
@@ -124,7 +126,7 @@ Plugin 启动时：
 
 **变更要点：**
 - 旧：pluginId 自声明，无鉴权，agentId 全局路由
-- 新：appId 预分配 + secret 鉴权，Server 按 appId 路由，agentId 仅用于 Plugin 内部 dispatch（Plugin 通过 bindings 映射 appId→agentId）
+- 新：appId 预分配 + secret 鉴权，Server 按 appId 路由，agentId 仅用于 Plugin 内部 dispatch（Plugin 通过 bindings 映射 `{channel, accountId}`→agentId）
 
 ### 浏览器连接
 
@@ -132,7 +134,7 @@ Plugin 启动时：
 浏览器打开页面时：
 1. 主动连 Chat Server 的 WS（wss://webchat.zeaho.site/ws）
 2. 发送注册消息：{ type: "register", userId: "xxx" }
-3. Chat Server 返回 agent 列表（包含 appId，用于后续消息路由）
+3. Chat Server 返回在线 app 列表（包含 appId，用于后续消息路由）
 4. 连接持久保持
 ```
 
@@ -165,7 +167,7 @@ Plugin 启动时：
 1. 浏览器发消息 `{ type: "message", appId: "wch_abc123", content: "你好" }`（不携带 agentId）
 2. Chat Server 按 `appId` 找到对应的 Plugin WS 连接
 3. 通过 WS 推给 Plugin：`{ type: "incoming", appId: "wch_abc123", userId: "xxx", content: "你好" }`（无 agentId）
-4. Plugin 收到 → 通过 bindings 映射 appId 到 agentId → resolveAgentRoute → Core dispatch
+4. Plugin 收到 → 根据连接对应的 accountId，通过 bindings 映射 `{channel, accountId}` 到 agentId → resolveAgentRoute → Core dispatch
 5. Agent 处理 → 回复 → Core 回调 `outbound.sendText()`
 6. Plugin 通过 WS 发回 Chat Server：`{ type: "outgoing", appId: "wch_abc123", userId: "xxx", content: "我是哪吒" }`（无 agentId）
 7. Chat Server 推给对应的浏览器
@@ -185,8 +187,7 @@ Plugin 连接地址：`wss://CHAT_SERVER_HOST:3100/plugin`
 {
   "type": "register",
   "appId": "wch_abc123",
-  "secret": "sk-xxx",
-
+  "secret": "sk-xxx"
 }
 
 // 转发回复给用户
@@ -215,7 +216,7 @@ Plugin 连接地址：`wss://CHAT_SERVER_HOST:3100/plugin`
   "content": "你好"
 }
 
-// agent 列表更新
+// 在线 App 列表更新（当前已连接 Plugin 的 apps，不是 apps.json 全量注册表）
 { "type": "app_list", "apps": [
   { "appId": "wch_abc123", "name": "研发小虾" },
   { "appId": "wch_def456", "name": "悟空" }
@@ -227,7 +228,7 @@ Plugin 连接地址：`wss://CHAT_SERVER_HOST:3100/plugin`
 - Server 返回 `register_error` 类型用于鉴权失败
 - `incoming` 消息新增 `appId` 字段，明确目标 Plugin
 - `outgoing` 消息新增 `appId` 字段。agentId 仅在 Plugin 内部通过 bindings 映射
-- `app_list` 消息中的 agent 携带 `appId` 前缀，浏览器据此区分同名 agent
+- `app_list` 消息使用 `apps` 数组，表示当前在线 apps（已连接的 Plugin 连接）。管理后台的 registry apps 表示 `apps.json` 中所有已注册 apps，二者语义不同
 
 ### 浏览器 ↔ Chat Server（WS 长连接）
 
@@ -272,8 +273,8 @@ Plugin 连接地址：`wss://CHAT_SERVER_HOST:3100/plugin`
 ```
 
 **变更要点：**
-- 浏览器发消息仅需携带 `appId`，无需 `agentId`。Server 按 appId 路由到 Plugin，Plugin 通过 bindings 映射到对应 agent
-- 前端 agent 列表按 `appId` 展示（每个 app = 一个 Agent），展示 name 即可，不需要 agentId
+- 浏览器发消息仅需携带 `appId`，无需 `agentId`。Server 按 appId 路由到对应 Plugin 连接，Plugin 再按该连接的 accountId 通过 bindings 映射到对应 agent
+- 前端在线 app 列表按 `appId` 展示（每个 app = 一个 Agent），展示 name 即可，不需要 agentId
 - 回复消息携带 `appId` 字段，前端据此匹配到对应会话
 
 ---
@@ -306,7 +307,7 @@ Plugin 连接地址：`wss://CHAT_SERVER_HOST:3100/plugin`
       "enabled": true,
       "serverUrl": "wss://webchat.zeaho.site/plugin",
       "accounts": {
-"dev-main":   { "appId": "wch_abc123", "secret": "***" },
+        "dev-main":   { "appId": "wch_abc123", "secret": "***" },
         "dev-helper": { "appId": "wch_def456", "secret": "***" },
         "cloud-main": { "appId": "wch_789ghi", "secret": "***" }
       }
@@ -325,7 +326,7 @@ Plugin 连接地址：`wss://CHAT_SERVER_HOST:3100/plugin`
 
 - `accounts.{accountId}` — 每个 account 对应 Server 端一个 App（一个 Agent 的身份），通过 appId 关联。一个 OpenClaw 部署有 N 个 Agent 就配 N 个 account（N 个 appId）
 - `bindings[]` — 全局层，将 `{channel, accountId}` 映射到 OpenClaw 的 `agentId`。这是 OpenClaw 标准的 agent 路由机制，飞书/企微也是同样用法
-- **Server 不感知 agentId**，只根据 appId 路由消息。appId `wch_abc123` 的消息只会发给注册了它的 Plugin，Plugin 通过 bindings 确定对应的 agentId
+- **Server 不感知 agentId**，只根据 appId 路由消息。appId `wch_abc123` 的消息只会发给注册了它的 Plugin 连接，Plugin 根据该连接对应的 accountId 通过 bindings 确定 agentId
 - 同一个 agentId（如 `main`）可以在不同 account 下重复（不同 OpenClaw 实例），Server 端 appId 全局唯一，互不干扰
 
 ## 多实例场景
@@ -357,10 +358,10 @@ Plugin 连接地址：`wss://CHAT_SERVER_HOST:3100/plugin`
 | **User** | userId | 真人用户标识，通过浏览器与 Agent 对话 |
 | **Browser/Tab** | WebSocket, userId, lastSeen | 用户的多设备/多 tab 连接，同一 userId 可有多个 |
 | **Chat Server** | browsers{}, plugins{}, appRegistry{} | 全局路由中心，维护所有 WS 连接，按 appId 路由到对应 Plugin |
-| **App** | appId, secret, name, enabled, createdAt | 一个 Agent 的身份标识。Server 侧注册的唯一凭证，`appId` 全局唯一，与 Plugin 侧 **Account** 一一对应。一个 Gateway 部署可有多个 App（多个 Agent 各自独立 appId）。由管理后台创建/删除，创建时录入 display name |
+| **App** | appId, secretHash, name, enabled, createdAt | Chat Server 上一个可被外部访问的 Agent 身份。Server 侧注册的唯一凭证，`appId` 全局唯一，与 Plugin 侧 **Account** 一一对应。一个 Gateway 部署可有多个 Account/App（多个 Agent 各自独立 appId）。由管理后台创建/删除，创建时录入 display name；secret 原文仅创建时返回一次 |
 | **Admin** | password(bcrypt), token, JWT | 管理后台的登录凭证。初始密码 `admin`，可修改。密码以 bcrypt 存储在 `apps.json` |
-| **Apps.json** | adminPassword, apps{appId→{secret,name,enabled,createdAt}} | Server 端的持久化文件，保存管理员密码 hash 和所有已注册 app 信息。管理后台 CRUD 操作的目标 |
-| **Plugin Instance** | appId, ws, agents[], accountId | 每个 OpenClaw 部署一个 Plugin，配置 appId + secret，主动长连 Chat Server |
+| **Apps.json** | adminPassword, apps{appId→{secretHash,name,enabled,createdAt}} | Server 端的持久化文件，保存管理员密码 hash 和所有已注册 app 信息。管理后台 CRUD 操作的目标，不保存 secret 原文 |
+| **Plugin Instance** | appId, ws, accountId | 每个 OpenClaw 部署一个 Plugin，可配置多个 Account；每个 Account 主动建立一条长连并注册一个 appId |
 | **Account** | accountId, appId, secret | Plugin 侧配置，对标飞书 accounts。与 Server 端 App 一一对应（通过 appId）。仅包含连接凭据（serverUrl 为 channel 公共配置），通过 bindings 绑定到 agentId |
 | **Agent** | agentId, name | Plugin 侧的 AI 对话代理。agentId 通过 bindings 与 Server 端 App 关联，仅 Plugin 内部可见 |
 | **OpenClaw Session** | sessionKey("webchat:{userId}:{appId}"), history | Core 管理，按 (用户, app) 二元组隔离会话（appId 全局唯一，= 一个 Agent），跨消息持久化 |
@@ -383,12 +384,12 @@ Plugin 连接地址：`wss://CHAT_SERVER_HOST:3100/plugin`
 ┌──────────────────────────────────────────────────────────┐
 │                   Chat Server                             │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │ browsers     │  │ plugins      │  │ appIndex   │   │
-│  │ userId ->    │  │ pluginId ->  │  │ appId ->     │   │
-│  │   Set<WS>    │  │   {ws,agents}│  │   pluginId   │   │
+│  │ browsers     │  │ plugins                       │   │
+│  │ userId ->    │  │ appId -> {ws, appId, name}    │   │
+│  │   Set<WS>    │  │                               │   │
 │  └──────────────┘  └──────────────┘  └──────────────┘   │
 │  路由: browser msg(appId) → plugins.get(appId)       │
-│        → pluginId → plugin.ws → {type:"incoming"}    │
+│        → appId → plugin.ws → {type:"incoming"}       │
 │       plugin reply(userId) → browsers[userId]          │
 └──────────────────┬───────────────────────────────────────┘
                    │ Plugin 主动 WS 连接（内网友好）
@@ -436,17 +437,17 @@ Plugin 连接地址：`wss://CHAT_SERVER_HOST:3100/plugin`
 **Browser ↔ Chat Server（N:1）**
 - 所有浏览器 WS 连接汇聚到同一个公网 Chat Server
 - 连接路径：`wss://host/ws`
-- 注册后 Server 返回可用 agent 列表
+- 注册后 Server 返回当前在线 app 列表
 
 **App（Plugin Instance）↔ Plugin Socket（1:1）**
 - 每个 App 对应一个 WebSocket 连接
-- `plugins`：`appId → { ws, agents[] }`
+- `plugins`：`appId → { ws, appId, name, connectedAt }`
 - 注册时需用 `appId` + `secret` 鉴权
 - 断线自动重连（指数退避 2s→30s）
 - **内网不需要公网 IP**，只要能出站访问 Chat Server 即可
 
-**Agent ↔ App（N:1）**
-- 每个 Agent 只属于一个 App（一个 OpenClaw 实例）
+**Agent 身份 ↔ App（1:1 external identity）**
+- 每个 App 是 Chat Server 上一个独立的外部 Agent 身份；同一个 OpenClaw Gateway 可通过多个 Account 暴露多个 App
 - Server 按 `appId` 路由消息：browser msg(appId) → plugins[appId] → plugin WS
 - agentId 仅用于 Plugin 内部 resolveAgentRoute（通过 bindings 映射），浏览器和 Server 不感知
 
@@ -455,7 +456,7 @@ Plugin 连接地址：`wss://CHAT_SERVER_HOST:3100/plugin`
 **User ↔ Agent（N:M via Session）**
 - 用户选不同 Agent 对话，同 Agent 服务不同用户
 - **同一 appId（同一 Agent）下，不同 userId 对应不同 session**。例如 appId=wch_abc123，UserA 的 sessionKey 是 `webchat:UserA:wch_abc123`，UserB 的是 `webchat:UserB:wch_abc123`，互不干扰，历史隔离
-- Plugin 发消息时通过 bindings 将 appId 映射到 agentId
+- Plugin 发消息时使用当前 account 的 appId；agentId 由 `{channel, accountId}` bindings 在 Plugin 内部解析
 - Core 按 `sessionKey = "webchat:{userId}:{appId}"` 管理会话（appId 全局唯一，= 一个 Agent）
 - 每个 `(userId, appId)` 组合有独立对话历史
 - sessionKey 格式：`"webchat:{userId}:{appId}"`
@@ -497,7 +498,7 @@ UserB (浏览器) ──────┤──── Chat Server (:3100)
     agent: main (研发小虾)     agent: main (悟空)
 ```
 
-- UserA 选 "悟空"（appId: wch_def456）→ 浏览器发 `{ type: "message", appId: "wch_def456", content: "..." }` → Server 查 `plugins["wch_def456"]` → 推给对应 Plugin → Plugin 通过 bindings 映射到 agentId → dispatch → Agent 回复
+- UserA 选 "悟空"（appId: wch_def456）→ 浏览器发 `{ type: "message", appId: "wch_def456", content: "..." }` → Server 查 `plugins["wch_def456"]` → 推给对应 Plugin 连接 → Plugin 按该连接的 accountId 通过 bindings 映射到 agentId → dispatch → Agent 回复
 - UserB 选 "研发小虾"（`wch_abc123/main`）→ 同理按 appId 路由到另一台机器
 - ✅ 两个 agentId 都是 "main"，但按 appId 区分，不会冲突
 
@@ -583,14 +584,13 @@ UserB (浏览器) ──────┤──── Chat Server (:3100)
 
 会话状态（按 (userId, appId) 划分，appId 唯一 = 一个 Agent）：
   - activeAppId: 当前选中的 App
-  - activeAgentId: 当前选中的 Agent
   - messages[appId]: 每个 Agent（= 每个 appId）的独立消息列表
     - messages["wch_abc123"] = [{ role, content, time }, ...]
     - messages["wch_def456"] = [{ role, content, time }, ...]
 ```
 
 **变更要点：**
-- 旧：`messages[appId]` 按 agentId 分流
+- 旧：`messages[agentId]` 按 agentId 分流
 - 新：agentId 不出现在前端。`messages[appId]` 按 appId 分流（appId 全局唯一，= 一个 Agent）
 
 **历史记录加载：**
@@ -601,7 +601,7 @@ UserB (浏览器) ──────┤──── Chat Server (:3100)
 
 **消息渲染逻辑：**
 - 收到 `{ type: "message", appId: "wch_abc123", from: "agent", content: "..." }` → 按 appId 追加到 messages["wch_abc123"] → 追加到 `messages["wch_abc123"]`
-- 如果当前 `activeAgentId === "nezha"`，把消息显示到聊天区
+- 如果当前 `activeAppId === "wch_abc123"`，把消息显示到聊天区
 - 否则不显示，但在 Agent 卡片上标红点/未读提示
 
 ### 多 Agent 隔离示例（V2：按 appId 路由）
@@ -711,21 +711,21 @@ http://CHAT_SERVER_HOST:3100/admin
   "apps": {
     "wch_abc123": {
       "appId": "wch_abc123",
-      "secret": "***",
+      "secretHash": "$2b$10$...",
       "name": "研发小虾",
       "createdAt": "2026-05-31T10:00:00Z",
       "enabled": true
     },
     "wch_def456": {
       "appId": "wch_def456",
-      "secret": "***",
+      "secretHash": "$2b$10$...",
       "name": "小助手",
       "createdAt": "2026-05-31T10:00:00Z",
       "enabled": true
     },
     "wch_789ghi": {
       "appId": "wch_789ghi",
-      "secret": "***",
+      "secretHash": "$2b$10$...",
       "name": "哪吒(PROD)",
       "createdAt": "2026-05-31T11:00:00Z",
       "enabled": true
@@ -753,7 +753,7 @@ http://CHAT_SERVER_HOST:3100/admin
 
 - 格式：`sk-wch-` + 随机 32 位 hex 字符串
 - 示例：`sk-wch-8f3a9c2e1b4d6f0a7c5e9b8d2a4f6c0e`
-- 创建时 Server 生成并返回，后续不再暴露原文
+- 创建时 Server 生成并返回，后续不再暴露原文；`apps.json` 只保存 `secretHash`（bcrypt）
 
 ### 管理界面 UI
 

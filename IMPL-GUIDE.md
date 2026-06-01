@@ -51,7 +51,7 @@ Use one small JSON protocol across both WebSocket paths.
 
 ### Plugin -> Chat Server
 
-注册消息（V2：appId + secret 鉴权，替代 pluginId）：
+注册消息（appId + secret 鉴权）：
 
 ```json
 {
@@ -67,7 +67,6 @@ Use one small JSON protocol across both WebSocket paths.
 {
   "type": "outgoing",
   "appId": "wch_abc123",
-  "agentId": "main",
   "userId": "u_123",
   "conversationId": "u_123",
   "content": "你好，我是研发小虾。",
@@ -81,8 +80,8 @@ Use one small JSON protocol across both WebSocket paths.
 // 注册成功
 { "type": "registered", "ok": true, "appId": "wch_abc123" }
 
-// 注册失败（appId 不存在或 secret 不匹配）
-{ "type": "register_error", "error": "invalid_app" | "invalid_secret" }
+// 注册失败（appId 不存在、已禁用或 secret 不匹配）
+{ "type": "register_error", "error": "invalid_secret" }
 ```
 
 用户消息：
@@ -92,7 +91,6 @@ Use one small JSON protocol across both WebSocket paths.
   "type": "incoming",
   "userId": "u_123",
   "appId": "wch_abc123",
-  "agentId": "main",
   "conversationId": "u_123",
   "content": "你好",
   "messageId": "browser_1710000000000"
@@ -111,13 +109,32 @@ App 列表（直接展示 appId + name，一个 appId = 一个 Agent）：
 }
 ```
 
+History payload（Server 按 `(userId, appId)` 返回最近消息；消息中不携带 `agentId`）：
+
+```json
+{
+  "type": "history",
+  "messages": {
+    "wch_abc123": [
+      {
+        "from": "user",
+        "appId": "wch_abc123",
+        "content": "你好",
+        "messageId": "browser_1710000000000",
+        "timestamp": 1710000000000
+      }
+    ]
+  }
+}
+```
+
 ### Browser -> Chat Server
 
 ```json
 // 注册
 { "type": "register", "userId": "吴涛" }
 
-// 发消息（V2：仅需 appId，不携带 agentId。Server 按 appId 路由到 Plugin，Plugin 通过 bindings 映射到对应 agent）
+// 发消息（V2：仅需 appId，不携带 agentId。Server 按 appId 路由到 Plugin，Plugin 根据连接对应的 accountId 通过 bindings 映射到对应 agent）
 {
   "type": "message",
   "appId": "wch_abc123",
@@ -143,9 +160,8 @@ App 列表（直接展示 appId + name，一个 appId = 一个 Agent）：
 // 回复消息（V2：携带 appId）
 {
   "type": "message",
-  "from": "agent:main",
+  "from": "agent",
   "appId": "wch_abc123",
-  "agentId": "main",
   "content": "你好，我是研发小虾。"
 }
 ```
@@ -167,6 +183,7 @@ App 列表（直接展示 appId + name，一个 appId = 一个 Agent）：
     "dev": "node server.js"
   },
   "dependencies": {
+    "bcryptjs": "^2.4.3",
     "ws": "^8.18.0"
   }
 }
@@ -179,7 +196,8 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { WebSocketServer } from "ws";
+import bcrypt from "bcryptjs";
+import { WebSocket, WebSocketServer } from "ws";
 
 const PORT = Number(process.env.PORT || 3100);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -191,17 +209,40 @@ const browserMeta = new WeakMap();
 // ws -> { userId, lastSeen }
 
 const plugins = new Map();
-// appId -> { ws, appId, agents, lastSeen }
+// appId -> { ws, appId, name, connectedAt, lastSeen }
 
 const pluginMeta = new WeakMap();
 // ws -> { appId, lastSeen }
 
 const appRegistry = new Map();
-// appId -> { secret, name } — Server 侧预先注册的应用凭证
-// 从 apps.json 配置文件加载
+// appId -> { secretHash, name, enabled } — 从 apps.json 加载的注册表 apps
+
+const messageHistory = new Map();
+// JSON.stringify([userId, appId]) -> [{ from, appId, content, messageId, timestamp }]
+
+const HISTORY_LIMIT = 100;
+
+function loadAppRegistry() {
+  const file = path.join(__dirname, "apps.json");
+  if (!fs.existsSync(file)) return;
+
+  const data = JSON.parse(fs.readFileSync(file, "utf8"));
+  appRegistry.clear();
+
+  for (const [appId, app] of Object.entries(data.apps || {})) {
+    appRegistry.set(appId, {
+      appId,
+      name: app.name || appId,
+      secretHash: app.secretHash,
+      enabled: app.enabled !== false
+    });
+  }
+}
+
+loadAppRegistry();
 
 function sendJson(ws, payload) {
-  if (ws.readyState !== ws.OPEN) return false;
+  if (ws.readyState !== WebSocket.OPEN) return false;
 
   try {
     ws.send(JSON.stringify(payload));
@@ -220,22 +261,19 @@ function parseJson(raw) {
 }
 
 function listApps() {
-  const agents = [];
+  const apps = [];
 
   for (const [appId, entry] of plugins.entries()) {
-    for (const agent of entry.agents || []) {
-      agents.push({
-        appId,
-        agentId: agent.agentId,
-        name: app.name || agent.agentId
-      });
-    }
+    apps.push({
+      appId,
+      name: entry.name || appId
+    });
   }
 
-  return agents;
+  return apps;
 }
 
-function broadcastAgentList() {
+function broadcastAppList() {
   const apps = listApps();
 
   for (const browserSet of browsers.values()) {
@@ -245,7 +283,7 @@ function broadcastAgentList() {
   }
 
   for (const entry of plugins.values()) {
-    sendJson(entry.ws, { type: "app_list", agents });
+    sendJson(entry.ws, { type: "app_list", apps });
   }
 }
 
@@ -275,52 +313,65 @@ function removeBrowser(ws) {
 }
 
 function registerApp(ws, appId, name) {
-  const normalizedAgents = Array.isArray(agents)
-    ? agents.map((agent) => {
-        if (typeof agent === "string") {
-          return { agentId: agent, name: agent };
-        }
-
-        return {
-          agentId: String(agent.agentId),
-          name: app.name || String(agent.agentId)
-        };
-      })
-    : [];
-
-  plugins.set(pluginId, {
+  plugins.set(appId, {
     ws,
-    pluginId,
-    agents: normalizedAgents,
+    appId,
+    name,
+    connectedAt: Date.now(),
     lastSeen: Date.now()
   });
 
   pluginMeta.set(ws, {
-    pluginId,
+    appId,
     lastSeen: Date.now()
   });
-
-  for (const agent of normalizedAgents) {
-    appIndex.set(agent.agentId, pluginId);
-  }
 }
 
 function removePlugin(ws) {
   const meta = pluginMeta.get(ws);
-  if (!meta?.pluginId) return;
+  if (!meta?.appId) return;
 
-  const entry = plugins.get(meta.pluginId);
-  plugins.delete(meta.pluginId);
-
-  if (entry?.agents) {
-    for (const agent of entry.agents) {
-      if (appIndex.get(agent.agentId) === meta.pluginId) {
-        appIndex.delete(agent.agentId);
-      }
-    }
+  const entry = plugins.get(meta.appId);
+  if (entry?.ws === ws) {
+    plugins.delete(meta.appId);
   }
 
-  broadcastAgentList();
+  broadcastAppList();
+}
+
+function historyKey(userId, appId) {
+  return JSON.stringify([userId, appId]);
+}
+
+function appendHistory({ userId, appId, from, content, messageId }) {
+  const key = historyKey(userId, appId);
+  const list = messageHistory.get(key) || [];
+
+  list.push({
+    from,
+    appId,
+    content,
+    messageId,
+    timestamp: Date.now()
+  });
+
+  if (list.length > HISTORY_LIMIT) {
+    list.splice(0, list.length - HISTORY_LIMIT);
+  }
+
+  messageHistory.set(key, list);
+}
+
+function getHistoryForUser(userId) {
+  const messages = {};
+
+  for (const [key, list] of messageHistory.entries()) {
+    const [historyUserId, appId] = JSON.parse(key);
+    if (historyUserId !== userId) continue;
+    messages[appId] = list;
+  }
+
+  return messages;
 }
 
 function routeBrowserMessage(ws, message) {
@@ -334,46 +385,64 @@ function routeBrowserMessage(ws, message) {
     return;
   }
 
-  const apps = listApps();
-  const agentId = message.agentId || agents[0]?.agentId;
+  const appId = String(message.appId || "");
 
-  if (!agentId) {
+  if (!appId) {
     sendJson(ws, {
       type: "error",
-      error: "no_agent_available"
+      error: "missing_app_id"
     });
     return;
   }
 
-  const pluginId = appIndex.get(agentId);
-  const plugin = pluginId ? plugins.get(pluginId) : null;
+  const plugin = plugins.get(appId);
 
-  if (!plugin || plugin.ws.readyState !== plugin.ws.OPEN) {
+  if (!plugin || plugin.ws.readyState !== WebSocket.OPEN) {
     sendJson(ws, {
       type: "error",
-      error: "agent_unavailable",
-      agentId
+      error: "app_unavailable",
+      appId
     });
     return;
   }
+
+  const messageId = message.messageId || `browser_${Date.now()}`;
+  const content = String(message.content || "");
+
+  appendHistory({
+    userId: meta.userId,
+    appId,
+    from: "user",
+    content,
+    messageId
+  });
 
   sendJson(plugin.ws, {
     type: "incoming",
+    appId,
     userId: meta.userId,
-    agentId,
     conversationId: meta.userId,
-    content: String(message.content || ""),
-    messageId: message.messageId || `browser_${Date.now()}`
+    content,
+    messageId
   });
 }
 
 function routePluginOutgoing(ws, message) {
   const meta = pluginMeta.get(ws);
 
-  if (!meta?.pluginId) {
+  if (!meta?.appId) {
     sendJson(ws, {
       type: "error",
       error: "plugin_not_registered"
+    });
+    return;
+  }
+
+  if (String(message.appId || "") !== meta.appId) {
+    sendJson(ws, {
+      type: "error",
+      error: "app_id_mismatch",
+      expectedAppId: meta.appId
     });
     return;
   }
@@ -391,13 +460,24 @@ function routePluginOutgoing(ws, message) {
     return;
   }
 
+  const content = String(message.content || "");
+  const messageId = message.messageId || `plugin_${Date.now()}`;
+
+  appendHistory({
+    userId,
+    appId: meta.appId,
+    from: "agent",
+    content,
+    messageId
+  });
+
   for (const browser of browserSet) {
     sendJson(browser, {
       type: "message",
       from: "agent",
-      appId: message.appId,
-      content: String(message.content || ""),
-      messageId: message.messageId || `plugin_${Date.now()}`
+      appId: meta.appId,
+      content,
+      messageId
     });
   }
 
@@ -458,7 +538,12 @@ browserWss.on("connection", (ws) => {
 
       sendJson(ws, {
         type: "app_list",
-        agents: listApps()
+        apps: listApps()
+      });
+
+      sendJson(ws, {
+        type: "history",
+        messages: getHistoryForUser(userId)
       });
 
       return;
@@ -515,10 +600,18 @@ pluginWss.on("connection", (ws) => {
       const appEntry = appRegistry.get(appId);
       if (!appEntry) {
         sendJson(ws, { type: "register_error", error: "invalid_app" });
+        ws.close();
         return;
       }
-      if (appEntry.secret !== secret) {
+      if (!appEntry.enabled) {
+        sendJson(ws, { type: "register_error", error: "app_disabled" });
+        ws.close();
+        return;
+      }
+
+      if (!appEntry.secretHash || !bcrypt.compareSync(secret, appEntry.secretHash)) {
         sendJson(ws, { type: "register_error", error: "invalid_secret" });
+        ws.close();
         return;
       }
 
@@ -528,10 +621,10 @@ pluginWss.on("connection", (ws) => {
         try { existing.ws.close(); } catch {}
       }
 
-      registerApp(ws, appId, existingApp.name);
+      registerApp(ws, appId, appEntry.name);
 
       sendJson(ws, { type: "registered", ok: true, appId });
-      broadcastAgentList();
+      broadcastAppList();
       return;
     }
 
@@ -598,12 +691,14 @@ server.listen(PORT, () => {
 Key details:
 
 - `browsers`: tracks all browser sockets by `userId`
-- `plugins`: tracks active OpenClaw plugin sockets by `pluginId`
-- `appIndex`: routes `appId -> pluginData`（不再使用 agentId 路由）
+- `plugins`: `Map<appId, { ws, appId, name, connectedAt }>` tracks active OpenClaw plugin sockets by `appId`
+- `appRegistry`: tracks all registered apps loaded from `apps.json`
+- `apps.json` stores `secretHash` only; the admin creation API returns the plaintext secret once
 - `/ws`: browser WebSocket endpoint
 - `/plugin`: OpenClaw plugin WebSocket endpoint
 - heartbeat uses WebSocket ping/pong every 30 seconds
 - server does not run OpenClaw logic; it only routes frames
+- `app_list` contains online apps from `plugins`, while registry apps are the full `apps.json` set
 
 ---
 
@@ -647,7 +742,6 @@ Key details:
               },
               "required": ["appId", "secret"]
             }
-          }
           }
         }
       },
@@ -754,7 +848,7 @@ import { CHANNEL_ID, DEFAULT_SERVER_URL } from "./const.js";
 /**
  * 解析 webchat channel 配置（保持兼容性）
  * 新配置格式：channels.webchat.accounts.{accountId}
- * 旧配置格式：channels.webchat.serverUrl（兼容过渡，不含 agents）
+ * 旧配置格式：channels.webchat.serverUrl（兼容过渡）
  */
 /** 提取 channels.webchat 段（对标 feishu 的 getLarkConfig） */
 export function getWebChatConfig(cfg) {
@@ -816,7 +910,7 @@ export function getDefaultWebChatAccountId(cfg) {
  *   "accounts": {
  *     "my-instance": {
  *       "appId": "wch_abc123",
- *       "secret": "sk-xxx",
+ *       "secret": "sk-xxx"
  *     }
  *   }
  * }
@@ -877,7 +971,7 @@ const plugin = {
   id: "webchat-openclaw-plugin",
   name: "WebChat",
   description: "Browser WebChat channel for OpenClaw",
-  configSchema: emptyPluginConfigSchema()
+  configSchema: emptyPluginConfigSchema(),
 
   register(api) {
     setWebChatRuntime(api.runtime);
@@ -908,8 +1002,9 @@ api.registerChannel({ plugin });
 import { CHANNEL_ID, DEFAULT_ACCOUNT_ID, TEXT_CHUNK_LIMIT } from "./const.js";
 import {
   listWebChatAccountIds,
-  resolveWebChatAccount,
-  getDefaultWebChatAccountId
+  getWebChatAccount,
+  getDefaultWebChatAccountId,
+  isConfigured
 } from "./accounts.js";
 import {
   startWebChatWsClient,
@@ -930,12 +1025,12 @@ const meta = {
 };
 
 export const webchatPlugin = {
-  id: CHANNEL_ID
+  id: CHANNEL_ID,
 
   meta: {
     ...meta,
     quickstartAllowFrom: true
-  }
+  },
 
   capabilities: {
     chatTypes: ["direct"],
@@ -944,47 +1039,47 @@ export const webchatPlugin = {
     media: false,
     nativeCommands: false,
     blockStreaming: true
-  }
+  },
 
   reload: {
     configPrefixes: [`channels.${CHANNEL_ID}`]
-  }
+  },
 
   config: {
-    listAccountIds: (cfg) => listWebChatAccountIds(cfg)
+    listAccountIds: (cfg) => listWebChatAccountIds(cfg),
 
     resolveAccount: (cfg, accountId) => {
       return getWebChatAccount(cfg, accountId || DEFAULT_ACCOUNT_ID);
-    }
+    },
 
     defaultAccountId: (cfg) => {
       return getDefaultWebChatAccountId(cfg);
-    }
+    },
 
     isConfigured: (account) => {
       return isConfigured(account);
-    }
+    },
 
     describeAccount: (account) => {
       return {
         accountId: account.accountId,
         enabled: account.enabled,
-        configured: Boolean(account.serverUrl),
+        configured: Boolean(account.serverUrl && account.appId && account.secret),
         serverUrl: account.serverUrl,
         appId: account.appId
       };
-    }
+    },
 
     resolveAllowFrom: ({ account }) => {
       return account.allowFrom || ["*"];
-    }
+    },
 
     formatAllowFrom: ({ allowFrom }) => {
       return allowFrom
         .map((entry) => String(entry).trim())
         .filter(Boolean);
     }
-  }
+  },
 
   security: {
     resolveDmPolicy: ({ account }) => {
@@ -994,45 +1089,44 @@ export const webchatPlugin = {
         approveHint: "Ask the operator to add your WebChat user id to allowFrom."
       };
     }
-  }
+  },
 
   messaging: {
     normalizeTarget: (target) => {
       const trimmed = String(target || "").trim();
       return trimmed || undefined;
-    }
+    },
 
     targetResolver: {
       looksLikeId: (id) => Boolean(String(id || "").trim()),
       hint: "<webchatUserId>"
     }
-  }
+  },
 
   directory: {
     self: async () => null,
     listPeers: async () => [],
     listGroups: async () => []
-  }
+  },
 
   outbound: {
-    deliveryMode: "gateway"
+    deliveryMode: "gateway",
 
     chunker: (text, limit) => {
       return getWebChatRuntime().channel.text.chunkMarkdownText(text, limit);
-    }
+    },
 
-    textChunkLimit: TEXT_CHUNK_LIMIT
+    textChunkLimit: TEXT_CHUNK_LIMIT,
 
     async sendText(params) {
       return sendOutgoingMessage({
         to: params.to,
         text: params.text || "",
         accountId: params.accountId || DEFAULT_ACCOUNT_ID,
-        agentId: params.agentId,
         cfg: params.cfg
       });
     }
-  }
+  },
 
   status: {
     defaultRuntime: {
@@ -1041,7 +1135,7 @@ export const webchatPlugin = {
       lastStartAt: null,
       lastStopAt: null,
       lastError: null
-    }
+    },
 
     collectStatusIssues(accounts) {
       return accounts.flatMap((entry) => {
@@ -1053,15 +1147,15 @@ export const webchatPlugin = {
               channel: CHANNEL_ID,
               accountId: entry.accountId || DEFAULT_ACCOUNT_ID,
               kind: "config",
-              message: "WebChat serverUrl is not configured",
-              fix: "Set channels.webchat.serverUrl to ws://host:3100/plugin"
+              message: "WebChat account is missing serverUrl, appId, or secret",
+              fix: "Set channels.webchat.serverUrl and channels.webchat.accounts.<accountId>.appId/secret"
             }
           ];
         }
 
         return [];
       });
-    }
+    },
 
     buildChannelSummary: ({ snapshot }) => ({
       configured: snapshot.configured ?? false,
@@ -1069,22 +1163,22 @@ export const webchatPlugin = {
       lastStartAt: snapshot.lastStartAt ?? null,
       lastStopAt: snapshot.lastStopAt ?? null,
       lastError: snapshot.lastError ?? null
-    })
+    }),
 
     buildAccountSnapshot: ({ account, runtime }) => ({
       accountId: account.accountId,
       enabled: account.enabled,
-      configured: Boolean(account.serverUrl),
+      configured: Boolean(account.serverUrl && account.appId && account.secret),
       running: runtime?.running ?? false,
       lastStartAt: runtime?.lastStartAt ?? null,
       lastStopAt: runtime?.lastStopAt ?? null,
       lastError: runtime?.lastError ?? null
     })
-  }
+  },
 
   gateway: {
     async startAccount(ctx) {
-      const account = resolveWebChatAccount(ctx.cfg, ctx.accountId);
+      const account = getWebChatAccount(ctx.cfg, ctx.accountId);
 
       ctx.log?.info(
         `starting webchat[${account.accountId}] server=${account.serverUrl}`
@@ -1097,10 +1191,11 @@ export const webchatPlugin = {
         abortSignal: ctx.abortSignal,
         setStatus: ctx.setStatus
       });
-    }
+    },
 
-    async logoutAccount() {
-      await stopWebChatWsClient(DEFAULT_ACCOUNT_ID);
+    async logoutAccount(ctx = {}) {
+      const account = getWebChatAccount(ctx.cfg || {}, ctx.accountId || DEFAULT_ACCOUNT_ID);
+      await stopWebChatWsClient(account.accountId);
 
       return {
         cleared: false,
@@ -1131,7 +1226,7 @@ The channel owns:
 import WebSocket from "ws";
 import { CHANNEL_ID, DEFAULT_ACCOUNT_ID } from "./const.js";
 import { getWebChatRuntime } from "./runtime.js";
-import { resolveWebChatAccount } from "./accounts.js";
+import { getWebChatAccount } from "./accounts.js";
 
 const clients = new Map();
 // accountId -> client state
@@ -1165,7 +1260,6 @@ function buildInboundContext({ message, account, cfg }) {
   const userId = String(message.userId);
   const conversationId = String(message.conversationId || userId);
   const content = String(message.content || "");
-  const agentId = account.agentId || "default";  // Plugin 通过 bindings 自己的配置确定 agentId
 
   const route = core.channel.routing.resolveAgentRoute({
     cfg,
@@ -1174,43 +1268,47 @@ function buildInboundContext({ message, account, cfg }) {
     peer: {
       kind: "direct",
       id: conversationId
-    },
-    agentId
+    }
   });
 
-  // Override sessionKey to isolate by (user, agent)
+  const agentId = route.agentId;
+  if (!agentId) {
+    throw new Error(`No agent binding found for ${CHANNEL_ID}/${account.accountId}`);
+  }
+
+  // Override sessionKey to isolate by (user, app)
   // 同一 appId 下，不同 userId → 不同 session，对话历史互不干扰
   route.sessionKey = `${CHANNEL_ID}:${userId}:${message.appId}`;  // appId 唯一 = 一个 Agent
 
   const storePath = core.channel.session.resolveStorePath(cfg.session?.store, {
-    agentId: route.agentId
+    agentId
   });
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: content,
     RawBody: content,
-    CommandBody: content
+    CommandBody: content,
 
-    MessageSid: message.messageId || `webchat_${Date.now()}`
+    MessageSid: message.messageId || `webchat_${Date.now()}`,
 
     From: `${CHANNEL_ID}:${userId}`,
     To: `${CHANNEL_ID}:${conversationId}`,
-    SenderId: userId
+    SenderId: userId,
 
     SessionKey: route.sessionKey,
     AccountId: route.accountId,
-    ChatType: "direct"
+    ChatType: "direct",
 
     Timestamp: Date.now(),
     Provider: CHANNEL_ID,
     Surface: CHANNEL_ID,
     OriginatingChannel: CHANNEL_ID,
-    OriginatingTo: `${CHANNEL_ID}:${conversationId}`
+    OriginatingTo: `${CHANNEL_ID}:${conversationId}`,
 
-    CommandAuthorized: true
+    CommandAuthorized: true,
 
     WebChatMessage: message,
-    AgentId: agentId  // Plugin 通过 bindings 将 appId 映射到 agentId
+    AgentId: agentId
   });
 
   return {
@@ -1257,7 +1355,7 @@ async function dispatchIncoming({ message, account, cfg, runtime }) {
     dispatcherOptions: {
       onReplyStart: async () => {
         runtime.log?.(`[webchat] reply started user=${userId} agent=${agentId}`);
-      }
+      },
 
       deliver: async (payload, info) => {
         runtime.log?.(
@@ -1273,7 +1371,7 @@ async function dispatchIncoming({ message, account, cfg, runtime }) {
           accountId: account.accountId,
           cfg
         });
-      }
+      },
 
       onError: (err, info) => {
         runtime.error?.(
@@ -1319,8 +1417,7 @@ function connectWithReconnect(state) {
     sendJson(ws, {
       type: "register",
       appId: account.appId,
-      secret: account.secret,
-      // 一个 appId = 一个 Agent，无 agents
+      secret: account.secret
     });
 
     heartbeatTimer = setInterval(() => {
@@ -1344,17 +1441,36 @@ function connectWithReconnect(state) {
       return;
     }
 
+    if (message.type === "register_error") {
+      state.authFailed = true;
+      runtime.error?.(`[webchat] registration failed ${JSON.stringify(message)}`);
+      setStatus?.({
+        accountId: account.accountId,
+        running: false,
+        lastError: message.error || "registration_failed"
+      });
+      ws.close();
+      return;
+    }
+
     if (message.type === "pong") {
       state.lastPongAt = Date.now();
       return;
     }
 
     if (message.type === "app_list") {
-      runtime.log?.(`[webchat] app_list ${JSON.stringify(message.agents || [])}`);
+      runtime.log?.(`[webchat] app_list ${JSON.stringify(message.apps || [])}`);
       return;
     }
 
     if (message.type === "incoming") {
+      if (message.appId !== account.appId) {
+        runtime.error?.(
+          `[webchat] ignored incoming for appId=${message.appId}, expected=${account.appId}`
+        );
+        return;
+      }
+
       try {
         await dispatchIncoming({
           message,
@@ -1408,6 +1524,7 @@ function connectWithReconnect(state) {
 
 function scheduleReconnect(state) {
   if (state.abortSignal?.aborted) return;
+  if (state.authFailed) return;
 
   state.reconnectAttempt = (state.reconnectAttempt || 0) + 1;
 
@@ -1440,6 +1557,7 @@ export async function startWebChatWsClient({
     setStatus,
     ws: null,
     connected: false,
+    authFailed: false,
     reconnectAttempt: 0,
     reconnectTimer: null,
     lastPongAt: null
@@ -1492,7 +1610,6 @@ export async function sendOutgoingMessage({
   to,
   text,
   accountId = DEFAULT_ACCOUNT_ID,
-  agentId,
   cfg
 }) {
   let state = clients.get(accountId);
@@ -1513,7 +1630,6 @@ export async function sendOutgoingMessage({
   sendJson(state.ws, {
     type: "outgoing",
     appId: state.account.appId,
-    agentId: agentId,  // 通过 bindings 映射到 agentId
     userId,
     conversationId: userId,
     content: text,
@@ -1537,7 +1653,7 @@ The important flow is:
 ```text
 Chat Server
   -> plugin ws-client receives { type: "incoming", appId, userId, content } (无 agentId)
-  -> Plugin 查 bindings 映射 appId → agentId
+  -> Plugin 根据当前 accountId 查 bindings 映射 {channel, accountId} → agentId
   -> api.runtime.channel.reply.finalizeInboundContext(...)
   -> api.runtime.channel.session.recordInboundSession(...)
   -> api.runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher(...)
@@ -1590,8 +1706,7 @@ await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       await sendOutgoingMessage({
         to: `webchat:${userId}`,
         text: payload.text,
-        accountId: account.accountId,
-        agentId
+        accountId: account.accountId
       });
     }
   }
@@ -1619,7 +1734,7 @@ The channel outbound adapter should only translate OpenClaw’s target into a We
 
 ```js
 outbound: {
-  deliveryMode: "gateway"
+  deliveryMode: "gateway",
 
   async sendText({ to, text, accountId, cfg }) {
     return sendOutgoingMessage({
@@ -1643,8 +1758,7 @@ The outgoing frame sent to Chat Server is:
 ```js
 {
   type: "outgoing",
-  pluginId: "webchat-openclaw-plugin",
-  agentId: "nezha",
+  appId: "wch_abc123",
   userId: "u_123",
   conversationId: "u_123",
   content: "reply text",
@@ -1654,7 +1768,39 @@ The outgoing frame sent to Chat Server is:
 
 ---
 
-## 13. Browser Client
+## 13. Message History Storage
+
+Chat Server stores recent chat history by `(userId, appId)`, not by `agentId`.
+
+```js
+const messageHistory = new Map();
+// key = JSON.stringify([userId, appId])
+// value = [{ from, appId, content, timestamp, messageId }, ...]
+```
+
+Record browser messages before routing to the Plugin, and record Plugin replies after validating that `outgoing.appId` matches the appId registered on that socket. On browser registration, return history grouped by appId:
+
+```js
+{
+  type: "history",
+  messages: {
+    wch_abc123: [
+      { from: "user", appId: "wch_abc123", content: "你好", timestamp: 1710000000000, messageId: "browser_..." },
+      { from: "agent", appId: "wch_abc123", content: "你好，我是研发小虾。", timestamp: 1710000001000, messageId: "webchat_out_..." }
+    ]
+  }
+}
+```
+
+Isolation rules:
+
+- different `userId` values never share history
+- the same `userId` has separate histories for each `appId`
+- browser and server protocol messages still use `appId`; `agentId` stays inside Plugin binding resolution
+
+---
+
+## 14. Browser Client
 
 A minimal browser can connect like this:
 
@@ -1743,7 +1889,7 @@ A minimal browser can connect like this:
 
 ---
 
-## 14. Local Development
+## 15. Local Development
 
 ### Start Chat Server
 
@@ -1777,7 +1923,7 @@ Example `openclaw.json` channel config:
         "cloud-main": { "appId": "wch_789ghi", "secret": "***" }
       }
     }
-  }
+  },
 
   "bindings": [
     { "agentId": "main",   "match": { "channel": "webchat", "accountId": "dev-main" } },
@@ -1809,7 +1955,7 @@ Restart OpenClaw after linking if your runtime does not hot-load linked plugins.
 
 ---
 
-## 15. Caddy Reverse Proxy
+## 16. Caddy Reverse Proxy
 
 For production, expose the Chat Server with HTTPS and WebSocket upgrade support.
 
@@ -1883,11 +2029,11 @@ WantedBy=multi-user.target
 
 ---
 
-## 16. Production Notes
+## 17. Production Notes
 
 Use `wss://` in production. Keep `ws://` only for local development.
 
-Add authentication to `/plugin` before exposing publicly. The simplest production extension is a shared secret:
+Keep `/plugin` authenticated with the V2 `appId` + `secret` registration:
 
 ```json
 {
@@ -1897,7 +2043,7 @@ Add authentication to `/plugin` before exposing publicly. The simplest productio
 }
 ```
 
-Then validate `appId` + `secret` in `server.js` against `apps.json` before accepting plugin registration.
+Validate `appId` + `secret` in `server.js` against `apps.json` before accepting plugin registration. Store only `secretHash` in `apps.json`; return the plaintext secret only once when an admin creates the app.
 
 Add browser identity verification if the browser UI is public. Without auth, any browser can claim any `userId`.
 
@@ -1909,7 +2055,7 @@ The minimal viable production version is:
 
 - one Chat Server instance
 - Caddy HTTPS
-- plugin shared secret
+- appId + secret registration auth
 - browser login or signed user token
 - heartbeat cleanup
 - structured logs for register, incoming, outgoing, disconnect, reconnect
