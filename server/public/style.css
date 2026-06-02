@@ -296,6 +296,56 @@ button:active {
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
 }
 
+.message.typing .message-bubble {
+  min-width: 58px;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.message.typing-error .message-bubble {
+  color: #c62828;
+  background: #fff5f5;
+}
+
+.typing-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 18px;
+}
+
+.typing-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #8a8f98;
+  animation: typing-dot 1s ease-in-out infinite;
+}
+
+.typing-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes typing-dot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
 .message-time {
   font-size: 11px;
   color: #999;

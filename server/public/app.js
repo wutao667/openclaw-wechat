@@ -6,6 +6,7 @@ const state = {
   activeAppId: null,
   messages: {},
   unread: {},
+  typing: {},
   currentScreen: 'login',
   reconnectTimer: null,
   reconnectDelay: 3000,
@@ -48,6 +49,8 @@ function connectWebSocket(userId, userName) {
       state.ws = null;
     }
 
+    clearAllTypingIndicators();
+
     if (!ws.skipReconnect && !state.intentionallyClosed && state.userId) {
       scheduleReconnect();
     }
@@ -88,8 +91,23 @@ function handleServerMessage(data) {
   if (data.type === 'message') {
     const appId = data.appId || '';
     if (!appId || typeof data.content !== 'string') return;
+    removeTypingIndicator(appId);
     addMessage(appId, 'agent', data.content);
     renderAgentList();
+    return;
+  }
+
+  if (data.type === 'typing_start') {
+    const appId = data.appId || '';
+    if (!appId) return;
+    addTypingIndicator(appId);
+    return;
+  }
+
+  if (data.type === 'typing_error') {
+    const appId = data.appId || '';
+    if (!appId) return;
+    showTypingError(appId, data.error);
     return;
   }
 
@@ -232,6 +250,7 @@ function renderMessages() {
     list.appendChild(row);
   });
 
+  renderTypingIndicator(list, state.activeAppId);
   scrollMessagesToBottom();
 }
 
@@ -243,6 +262,111 @@ function addMessage(appId, role, content) {
     renderMessages();
   } else {
     state.unread[appId] = (state.unread[appId] || 0) + 1;
+  }
+}
+
+function addTypingIndicator(appId) {
+  removeTypingIndicator(appId, { render: false });
+
+  const typing = {
+    kind: 'start',
+    startedAt: Date.now(),
+    visible: false,
+    showTimer: window.setTimeout(() => {
+      typing.visible = true;
+      if (state.activeAppId === appId && state.currentScreen === 'chat') {
+        renderMessages();
+      }
+    }, 150),
+    timeoutTimer: window.setTimeout(() => {
+      showTypingError(appId, '回复超时，请稍后再试');
+    }, 120000),
+  };
+
+  state.typing[appId] = typing;
+}
+
+function removeTypingIndicator(appId, options = {}) {
+  const typing = state.typing[appId];
+  if (!typing) return;
+
+  clearTypingTimers(typing);
+  delete state.typing[appId];
+
+  if (options.render === false) return;
+  if (state.activeAppId === appId && state.currentScreen === 'chat') {
+    renderMessages();
+  }
+}
+
+function showTypingError(appId, error) {
+  const existing = state.typing[appId];
+  if (existing) {
+    clearTypingTimers(existing);
+  }
+
+  state.typing[appId] = {
+    kind: 'error',
+    startedAt: Date.now(),
+    error: typeof error === 'string' && error.trim() ? error : '回复失败',
+    visible: true,
+    showTimer: null,
+    timeoutTimer: null,
+  };
+
+  if (state.activeAppId === appId && state.currentScreen === 'chat') {
+    renderMessages();
+  }
+}
+
+function renderTypingIndicator(list, appId) {
+  const typing = state.typing[appId];
+  if (!typing || !typing.visible) return;
+
+  const row = document.createElement('div');
+  row.className = `message agent typing ${typing.kind === 'error' ? 'typing-error' : ''}`;
+  row.setAttribute('aria-label', typing.kind === 'error' ? '回复出错' : '对方正在输入');
+
+  const content = document.createElement('div');
+  content.className = 'message-content';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'message-bubble';
+
+  if (typing.kind === 'error') {
+    bubble.textContent = typing.error || '回复失败';
+  } else {
+    const dots = document.createElement('span');
+    dots.className = 'typing-dots';
+    dots.setAttribute('aria-hidden', 'true');
+    for (let index = 0; index < 3; index += 1) {
+      dots.appendChild(document.createElement('span'));
+    }
+    bubble.appendChild(dots);
+  }
+
+  content.appendChild(bubble);
+  row.appendChild(content);
+  list.appendChild(row);
+}
+
+function clearAllTypingIndicators() {
+  for (const typing of Object.values(state.typing)) {
+    clearTypingTimers(typing);
+  }
+  state.typing = {};
+
+  if (state.currentScreen === 'chat') {
+    renderMessages();
+  }
+}
+
+function clearTypingTimers(typing) {
+  if (typing.showTimer) {
+    clearTimeout(typing.showTimer);
+  }
+  if (typing.timeoutTimer) {
+    clearTimeout(typing.timeoutTimer);
   }
 }
 
@@ -300,6 +424,7 @@ function resetState() {
   state.activeAppId = null;
   state.messages = {};
   state.unread = {};
+  clearAllTypingIndicators();
   state.currentScreen = 'login';
   state.reconnectDelay = 3000;
   document.getElementById('username-input').value = '';

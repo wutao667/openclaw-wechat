@@ -103,6 +103,19 @@
     word-break: break-all; color: #333;
   }
   .secret-warning { color: #ff4d4f; font-size: 13px; margin-top: 8px; }
+  .secret-cell {
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 12px;
+    word-break: break-all;
+    max-width: 220px;
+    display: inline-block;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 3px;
+    transition: background .2s;
+  }
+  .secret-cell:hover { background: #e6f4ff; }
+  .secret-cell.copied { background: #f6ffed; color: #52c41a; }
 
   .toast {
     position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
@@ -129,6 +142,7 @@
       <tr>
         <th>App ID</th>
         <th>名称</th>
+        <th>Secret</th>
         <th>状态</th>
         <th>连接</th>
         <th>创建时间</th>
@@ -150,7 +164,7 @@
     <input type="text" id="appName" placeholder="例如：研发小虾" maxlength="64">
     <div class="actions">
       <button onclick="closeModal('createModal')">取消</button>
-      <button class="primary" onclick="createApp()">创建</button>
+      <button class="primary" id="createBtn" onclick="createApp()">创建</button>
     </div>
   </div>
 </div>
@@ -315,6 +329,7 @@ function renderTable(apps) {
     return `<tr>
       <td class="app-id">${escHtml(app.appId)}</td>
       <td>${escHtml(app.name)}</td>
+      <td>${app.secret ? `<span class="secret-cell" onclick="copySecret(this,'${escHtml(app.secret)}')" title="点击复制">${escHtml(app.secret)}</span>` : '-'}</td>
       <td><span class="badge ${enabled ? 'on' : 'off'}">${enabled ? '启用' : '禁用'}</span></td>
       <td><span class="badge ${connected ? 'connected' : 'disconnected'}">${connected ? '已连接' : '未连接'}</span></td>
       <td>${createdAt}</td>
@@ -353,6 +368,10 @@ function showCreateModal() {
 }
 
 async function createApp() {
+  const btn = document.getElementById('createBtn');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.textContent = '创建中...';
   const name = document.getElementById('appName').value.trim();
   if (!name) { showToast('请输入 App 名称', 'error'); return; }
 
@@ -369,6 +388,9 @@ async function createApp() {
     openModal('secretModal');
   } catch (e) {
     showToast('创建失败: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '创建';
   }
 }
 
@@ -469,6 +491,36 @@ async function changePassword() {
     showToast('密码修改成功');
   } catch (e) {
     showToast('修改失败: ' + e.message, 'error');
+  }
+}
+
+// ── Copy Secret ───────────────────────────────────────────────────────────
+
+async function copySecret(el, secret) {
+  try {
+    await navigator.clipboard.writeText(secret);
+    el.classList.add('copied');
+    el.textContent = '✓ 已复制';
+    setTimeout(() => {
+      el.classList.remove('copied');
+      el.textContent = secret;
+    }, 2000);
+  } catch {
+    // Fallback
+    const ta = document.createElement('textarea');
+    ta.value = secret;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    el.classList.add('copied');
+    el.textContent = '✓ 已复制';
+    setTimeout(() => {
+      el.classList.remove('copied');
+      el.textContent = secret;
+    }, 2000);
   }
 }
 

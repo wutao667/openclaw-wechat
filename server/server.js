@@ -156,6 +156,11 @@ pluginWss.on("connection", (ws) => {
 
     if (message.type === 'outgoing') {
       handlePluginOutgoing(ws, message);
+      return;
+    }
+
+    if (message.type === 'typing_start' || message.type === 'typing_error') {
+      handlePluginTyping(ws, message);
     }
   });
 
@@ -348,6 +353,35 @@ function routeBrowserMessage(ws, message, meta = browserMeta.get(ws)) {
 
 function handlePluginOutgoing(ws, message) {
   routePluginOutgoing(ws, message);
+}
+
+function handlePluginTyping(ws, message) {
+  const meta = pluginMeta.get(ws);
+  if (!meta) return;
+
+  const appId = typeof message.appId === 'string' && message.appId.trim() ? message.appId : null;
+  const userId = typeof message.userId === 'string' && message.userId.trim() ? message.userId : null;
+
+  if (appId !== meta.appId || !userId) return;
+
+  const outbound = {
+    type: message.type,
+    appId: meta.appId,
+    userId,
+  };
+
+  if (message.type === 'typing_error') {
+    outbound.error = typeof message.error === 'string' && message.error.trim()
+      ? message.error
+      : 'reply_failed';
+  }
+
+  const sockets = browsers.get(userId);
+  if (!sockets) return;
+
+  for (const browser of sockets) {
+    send(browser, outbound);
+  }
 }
 
 function routePluginOutgoing(ws, message) {
@@ -703,6 +737,7 @@ function handleAdminListApps(res) {
     .map((app) => ({
       appId: app.appId,
       name: app.name,
+      secret: app.secret,
       enabled: app.enabled !== false,
       connected: plugins.has(app.appId),
       createdAt: app.createdAt,
@@ -743,6 +778,7 @@ function handleAdminCreateApp(body, res) {
 
   store.apps[appId] = {
     appId,
+    secret,
     secretHash,
     name: trimmedName,
     createdAt: now,
@@ -782,6 +818,7 @@ function handleAdminGetApp(appId, res) {
     app: {
       appId: app.appId,
       name: app.name,
+      secret: app.secret,
       enabled: app.enabled !== false,
       connected: plugins.has(app.appId),
       createdAt: app.createdAt,
