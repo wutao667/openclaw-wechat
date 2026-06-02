@@ -48,6 +48,10 @@ function buildInboundContext({ message, account, cfg }) {
   const conversationId = String(message.conversationId || userId);
   const content = String(message.content || "");
 
+  // Debug: check if cfg has bindings
+  const hasBindings = Boolean(cfg?.bindings?.length);
+  const bindingCount = cfg?.bindings?.length ?? 0;
+  
   const route = core.channel.routing.resolveAgentRoute({
     cfg,
     channel: CHANNEL_ID,
@@ -59,6 +63,13 @@ function buildInboundContext({ message, account, cfg }) {
   });
 
   const agentId = route.agentId;
+  const debugPath = '/tmp/wch_debug.log';
+  try {
+    fs.writeFileSync(debugPath,
+      `[DEBUG] accountId=${account.accountId} appId=${account.appId} hasBindings=${hasBindings} bindingCount=${bindingCount} agentId=${agentId}\n`,
+      { flag: 'a' }
+    );
+  } catch(e) {}
   if (!agentId) {
     throw new Error(`No agent binding found for ${CHANNEL_ID}/${account.accountId}`);
   }
@@ -76,7 +87,7 @@ function buildInboundContext({ message, account, cfg }) {
     To: `${CHANNEL_ID}:${conversationId}`,
     SenderId: userId,
     SessionKey: route.sessionKey,
-    AccountId: account.accountId,
+    AccountId: route.accountId,
     ChatType: "direct",
     ConversationLabel: `user:${String(message.userName || userId)}`,
     Timestamp: Date.now(),
@@ -126,16 +137,26 @@ async function dispatchIncoming({ message, account, cfg, runtime }) {
     },
   });
 
+  // 绕开 SDK 的 internal_webchat 抑制策略：在本地直接发 typing_start。
+  // SDK 对 OriginatingChannel === "webchat" 强制 suppressTyping，导致
+  // dispatcherOptions.onReplyStart 永远不会被调用。
+  sendTypingEvent({ kind: "start", account, userId });
+  runtime?.log?.(`[webchat] reply started user=${userId} agent=${agentId}`);
+  let firstTextSent = false;
+
   await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
     cfg,
     dispatcherOptions: {
-      onReplyStart: async () => {
-        runtime?.log?.(`[webchat] reply started user=${userId} agent=${agentId}`);
-      },
       deliver: async (payload) => {
         const text = payload.text || "";
         if (!text) return;
+
+        if (!firstTextSent) {
+          firstTextSent = true;
+          // fallback：万一前面的 start 失败，这里再补发一次
+          sendTypingEvent({ kind: "start", account, userId });
+        }
 
         await sendOutgoingMessage({
           to: `${CHANNEL_ID}:${userId}`,
@@ -145,6 +166,7 @@ async function dispatchIncoming({ message, account, cfg, runtime }) {
         });
       },
       onError: (err, info) => {
+        sendTypingEvent({ kind: "error", account, userId, error: err });
         runtime?.error?.(`[webchat] ${info.kind} reply failed: ${String(err)}`);
       },
     },
@@ -383,6 +405,39 @@ export async function stopWebChatWsClient(accountId = DEFAULT_ACCOUNT_ID) {
   state.aliveResolve?.();
 }
 
+export function sendTypingEvent({ kind, account, userId, error }) {
+  const accountId = account?.accountId || DEFAULT_ACCOUNT_ID;
+  const state = clients.get(accountId);
+
+  if (!state?.ws || state.ws.readyState !== WebSocket.OPEN) {
+    return false;
+  }
+
+  const type = kind === "error" ? "typing_error" : "typing_start";
+  const payload = {
+    type,
+    appId: state.account.appId,
+    userId: String(userId || ""),
+  };
+
+  if (!payload.userId) {
+    return false;
+  }
+
+  if (type === "typing_error") {
+    payload.error = normalizeTypingError(error);
+  }
+
+  return sendJson(state.ws, payload);
+}
+
+function normalizeTypingError(error) {
+  if (!error) return "reply_failed";
+  if (typeof error === "string") return error;
+  if (error.message) return String(error.message);
+  return String(error);
+}
+
 export function sendOutgoingMessage({ to, text, accountId = DEFAULT_ACCOUNT_ID, cfg }) {
   let state = clients.get(accountId);
 
@@ -398,7 +453,7 @@ export function sendOutgoingMessage({ to, text, accountId = DEFAULT_ACCOUNT_ID, 
     throw new Error(`WebChat websocket is not connected for account ${accountId}`);
   }
 
-  sendJson(state.ws, {
+  const sent = sendJson(state.ws, {
     type: "outgoing",
     appId: state.account.appId,
     userId,
@@ -406,6 +461,10 @@ export function sendOutgoingMessage({ to, text, accountId = DEFAULT_ACCOUNT_ID, 
     content: text,
     messageId,
   });
+
+  if (!sent) {
+    throw new Error(`Failed to send WebChat outgoing message for account ${accountId}`);
+  }
 
   return { channel: CHANNEL_ID, messageId, chatId: userId };
 }
