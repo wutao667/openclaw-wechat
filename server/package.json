@@ -16,6 +16,7 @@
     "dev": "node server.js"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "ws": "^8.18.0"
   },
   "engines": {

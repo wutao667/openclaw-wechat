@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
+import bcrypt from 'bcryptjs';
 
 const PORT = Number(process.env.PORT || 3100);
 const __filename = fileURLToPath(import.meta.url);
@@ -14,9 +15,10 @@ const browsers = new Map();
 const browserMeta = new WeakMap();
 const plugins = new Map();
 const pluginMeta = new WeakMap();
-const agentIndex = new Map();
+const appRegistry = new Map();
 const messageHistory = new Map();
 const heartbeatMeta = new WeakMap();
+const HISTORY_LIMIT = 100;
 
 const contentTypes = {
   '.html': 'text/html; charset=utf-8',
@@ -51,6 +53,8 @@ const server = http.createServer((req, res) => {
 
 const browserWss = new WebSocketServer({ noServer: true });
 const pluginWss = new WebSocketServer({ noServer: true });
+
+loadAppRegistry();
 
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
@@ -189,47 +193,62 @@ function registerBrowser(ws, message) {
   browserMeta.set(ws, { userId, userName, lastSeen: Date.now() });
 
   send(ws, { type: 'registered', userId });
-  send(ws, { type: 'agent_list', agents: getBrowserAgentList() });
-  send(ws, { type: 'history', messages: getUserHistory(userId) });
+  send(ws, { type: 'app_list', apps: listApps() });
+  send(ws, { type: 'history', messages: getHistoryForUser(userId) });
 }
 
 function registerPlugin(ws, message) {
-  console.log("registering plugin:", message.pluginId);
-  const pluginId = typeof message.pluginId === 'string' && message.pluginId.trim() ? message.pluginId : null;
-  const agents = Array.isArray(message.agents)
-    ? message.agents
-        .filter((agent) => agent && typeof agent.agentId === 'string' && agent.agentId.trim())
-        .map((agent) => ({
-          agentId: agent.agentId,
-          name: typeof agent.name === 'string' && agent.name.trim() ? agent.name : agent.agentId,
-        }))
-    : [];
+  const appId = typeof message.appId === 'string' && message.appId.trim() ? message.appId : null;
+  const secret = typeof message.secret === 'string' ? message.secret : '';
+  console.log("registering plugin app:", appId);
 
-  if (!pluginId) {
-    send(ws, { type: 'registered', ok: false, error: 'pluginId is required' });
+  if (!appId) {
+    send(ws, { type: 'register_error', ok: false, error: 'appId is required' });
+    ws.close();
     return;
   }
 
-  const existing = plugins.get(pluginId);
-  if (existing) {
-    clearPluginAgents(existing);
+  const appEntry = appRegistry.get(appId);
+  if (!appEntry) {
+    send(ws, { type: 'register_error', ok: false, error: 'invalid_app' });
+    ws.close();
+    return;
   }
 
+  if (!appEntry.enabled) {
+    send(ws, { type: 'register_error', ok: false, error: 'app_disabled' });
+    ws.close();
+    return;
+  }
+
+  if (!appEntry.secretHash || !bcrypt.compareSync(secret, appEntry.secretHash)) {
+    send(ws, { type: 'register_error', ok: false, error: 'invalid_secret' });
+    ws.close();
+    return;
+  }
+
+  registerApp(ws, appId, appEntry.name);
+
+  send(ws, { type: 'registered', ok: true, appId });
+  send(ws, { type: 'app_list', apps: listApps() });
+  broadcastAppList();
+}
+
+function registerApp(ws, appId, name) {
+  const existing = plugins.get(appId);
   if (existing && existing.ws !== ws) {
     existing.ws.close();
   }
 
-  const plugin = { ws, pluginId, agents, lastSeen: Date.now() };
-  plugins.set(pluginId, plugin);
-  pluginMeta.set(ws, { pluginId, lastSeen: Date.now() });
-
-  for (const agent of agents) {
-    agentIndex.set(agent.agentId, pluginId);
-  }
-
-  send(ws, { type: 'registered', ok: true });
-  send(ws, { type: 'agent_list', agents: getPluginAgentList() });
-  broadcastAgentList();
+  const now = Date.now();
+  plugins.set(appId, {
+    ws,
+    appId,
+    name: name || appId,
+    connectedAt: now,
+    lastSeen: now,
+  });
+  pluginMeta.set(ws, { appId, lastSeen: now });
 }
 
 function handleBrowserMessage(ws, message) {
@@ -239,19 +258,27 @@ function handleBrowserMessage(ws, message) {
     return;
   }
 
-  const agentId = typeof message.agentId === 'string' && message.agentId.trim() ? message.agentId : null;
-  const content = typeof message.content === 'string' ? message.content : null;
+  routeBrowserMessage(ws, message, meta);
+}
 
-  if (!agentId || content === null) {
-    send(ws, { type: 'error', error: 'agentId and content are required' });
+function routeBrowserMessage(ws, message, meta = browserMeta.get(ws)) {
+  if (!meta) {
+    send(ws, { type: 'error', error: 'browser must register first' });
     return;
   }
 
-  const pluginId = agentIndex.get(agentId);
-  const plugin = pluginId ? plugins.get(pluginId) : null;
+  const appId = typeof message.appId === 'string' && message.appId.trim() ? message.appId : null;
+  const content = typeof message.content === 'string' ? message.content : null;
+
+  if (!appId || content === null) {
+    send(ws, { type: 'error', error: 'appId and content are required' });
+    return;
+  }
+
+  const plugin = plugins.get(appId);
 
   if (!plugin || plugin.ws.readyState !== WebSocket.OPEN) {
-    send(ws, { type: 'error', error: `agent is unavailable: ${agentId}` });
+    send(ws, { type: 'error', error: `app is unavailable: ${appId}`, appId });
     return;
   }
 
@@ -259,18 +286,19 @@ function handleBrowserMessage(ws, message) {
     ? message.messageId
     : createMessageId('user');
 
-  storeMessage(meta.userId, agentId, {
-    role: 'user',
+  appendHistory({
+    userId: meta.userId,
+    appId,
+    from: 'user',
     content,
-    timestamp: Date.now(),
     messageId,
   });
 
   send(plugin.ws, {
     type: 'incoming',
+    appId,
     userId: meta.userId,
     userName: meta.userName,
-    agentId,
     conversationId: meta.userId,
     content,
     messageId,
@@ -278,19 +306,27 @@ function handleBrowserMessage(ws, message) {
 }
 
 function handlePluginOutgoing(ws, message) {
+  routePluginOutgoing(ws, message);
+}
+
+function routePluginOutgoing(ws, message) {
   const meta = pluginMeta.get(ws);
   if (!meta) {
     send(ws, { type: 'error', error: 'plugin must register first' });
     return;
   }
 
-  const pluginId = typeof message.pluginId === 'string' && message.pluginId.trim() ? message.pluginId : meta.pluginId;
-  const agentId = typeof message.agentId === 'string' && message.agentId.trim() ? message.agentId : null;
+  const appId = typeof message.appId === 'string' && message.appId.trim() ? message.appId : null;
   const userId = typeof message.userId === 'string' && message.userId.trim() ? message.userId : null;
   const content = typeof message.content === 'string' ? message.content : null;
 
-  if (pluginId !== meta.pluginId || !agentId || !userId || content === null) {
-    send(ws, { type: 'error', error: 'pluginId, agentId, userId, and content are required' });
+  if (appId !== meta.appId) {
+    send(ws, { type: 'error', error: 'appId does not match registered app', expectedAppId: meta.appId });
+    return;
+  }
+
+  if (!userId || content === null) {
+    send(ws, { type: 'error', error: 'appId, userId, and content are required' });
     return;
   }
 
@@ -299,15 +335,17 @@ function handlePluginOutgoing(ws, message) {
     : createMessageId('agent');
   const outbound = {
     type: 'message',
-    from: `agent:${agentId}`,
-    agentId,
+    from: 'agent',
+    appId: meta.appId,
     content,
+    messageId,
   };
 
-  storeMessage(userId, agentId, {
-    role: 'agent',
+  appendHistory({
+    userId,
+    appId: meta.appId,
+    from: 'agent',
     content,
-    timestamp: Date.now(),
     messageId,
   });
 
@@ -317,6 +355,8 @@ function handlePluginOutgoing(ws, message) {
   for (const browser of sockets) {
     send(browser, outbound);
   }
+
+  send(ws, { type: 'delivery_ack', ok: true, userId, messageId });
 }
 
 function removeBrowser(ws) {
@@ -336,78 +376,64 @@ function removePlugin(ws) {
   const meta = pluginMeta.get(ws);
   if (!meta) return;
 
-  const plugin = plugins.get(meta.pluginId);
+  const plugin = plugins.get(meta.appId);
   if (!plugin || plugin.ws !== ws) return;
 
-  clearPluginAgents(plugin);
-  plugins.delete(meta.pluginId);
-  broadcastAgentList();
+  plugins.delete(meta.appId);
+  broadcastAppList();
 }
 
-function clearPluginAgents(plugin) {
-  for (const agent of plugin.agents) {
-    if (agentIndex.get(agent.agentId) === plugin.pluginId) {
-      agentIndex.delete(agent.agentId);
-    }
-  }
+function historyKey(userId, appId) {
+  return JSON.stringify([userId, appId]);
 }
 
-function storeMessage(userId, agentId, message) {
-  const key = `${userId}:${agentId}`;
+function appendHistory({ userId, appId, from, content, messageId }) {
+  const key = historyKey(userId, appId);
   const messages = messageHistory.get(key) || [];
-  messages.push(message);
+  messages.push({
+    from,
+    appId,
+    content,
+    timestamp: Date.now(),
+    messageId,
+  });
 
-  if (messages.length > 100) {
-    messages.splice(0, messages.length - 100);
+  if (messages.length > HISTORY_LIMIT) {
+    messages.splice(0, messages.length - HISTORY_LIMIT);
   }
 
   messageHistory.set(key, messages);
 }
 
-function getUserHistory(userId) {
-  const prefix = `${userId}:`;
-  const messagesByAgent = {};
+function getHistoryForUser(userId) {
+  const messagesByApp = {};
 
   for (const [key, messages] of messageHistory.entries()) {
-    if (!key.startsWith(prefix)) continue;
-
-    const agentId = key.slice(prefix.length);
-    messagesByAgent[agentId] = messages;
+    const [historyUserId, appId] = JSON.parse(key);
+    if (historyUserId !== userId) continue;
+    messagesByApp[appId] = messages;
   }
 
-  return messagesByAgent;
+  return messagesByApp;
 }
 
-function getBrowserAgentList() {
-  return Array.from(plugins.values()).flatMap((plugin) => (
-    plugin.agents.map((agent) => ({
-      agentId: agent.agentId,
-      name: agent.name,
-    }))
-  ));
+function listApps() {
+  return Array.from(plugins.values()).map((plugin) => ({
+    appId: plugin.appId,
+    name: plugin.name || plugin.appId,
+  }));
 }
 
-function getPluginAgentList() {
-  return Array.from(plugins.values()).flatMap((plugin) => (
-    plugin.agents.map((agent) => ({
-      pluginId: plugin.pluginId,
-      agentId: agent.agentId,
-      name: agent.name,
-    }))
-  ));
-}
-
-function broadcastAgentList() {
-  const browserAgentList = getBrowserAgentList();
+function broadcastAppList() {
+  const apps = listApps();
   for (const sockets of browsers.values()) {
     for (const ws of sockets) {
-      send(ws, { type: 'agent_list', agents: browserAgentList });
+      send(ws, { type: 'app_list', apps });
     }
   }
 
-  const pluginAgentList = getPluginAgentList();
   for (const plugin of plugins.values()) {
-    send(plugin.ws, { type: 'agent_list', agents: pluginAgentList });
+    send(plugin.ws, { type: 'app_list', apps });
   }
 }
 
@@ -442,7 +468,7 @@ function markPong(ws) {
   const plugin = pluginMeta.get(ws);
   if (plugin) {
     plugin.lastSeen = now;
-    const registeredPlugin = plugins.get(plugin.pluginId);
+    const registeredPlugin = plugins.get(plugin.appId);
     if (registeredPlugin && registeredPlugin.ws === ws) {
       registeredPlugin.lastSeen = now;
     }
@@ -464,6 +490,27 @@ function parseJson(raw) {
 
 function createMessageId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function loadAppRegistry() {
+  const filePath = path.join(__dirname, 'apps.json');
+  if (!fs.existsSync(filePath)) return;
+
+  try {
+    const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    appRegistry.clear();
+
+    for (const [appId, app] of Object.entries(data.apps || {})) {
+      appRegistry.set(appId, {
+        appId,
+        name: app.name || appId,
+        secretHash: app.secretHash,
+        enabled: app.enabled !== false,
+      });
+    }
+  } catch (error) {
+    console.error('failed to load apps registry:', error);
+  }
 }
 
 function safeDecode(pathname) {

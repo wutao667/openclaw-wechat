@@ -2,8 +2,8 @@ const state = {
   ws: null,
   userId: '',
   userName: '',
-  agents: [],
-  activeAgentId: null,
+  apps: [],
+  activeAppId: null,
   messages: {},
   unread: {},
   currentScreen: 'login',
@@ -68,39 +68,39 @@ function handleServerMessage(data) {
     return;
   }
 
-  if (data.type === 'agent_list') {
-    state.agents = Array.isArray(data.agents) ? data.agents : [];
+  if (data.type === 'app_list') {
+    state.apps = Array.isArray(data.apps) ? data.apps : [];
 
-    if (state.activeAgentId && !state.agents.some((agent) => agent.agentId === state.activeAgentId)) {
-      state.activeAgentId = null;
+    if (state.activeAppId && !state.apps.some((app) => app.appId === state.activeAppId)) {
+      state.activeAppId = null;
       if (state.currentScreen === 'chat') {
         showScreen('agents');
       }
     }
 
     renderAgentList();
-    if (state.activeAgentId) {
+    if (state.activeAppId) {
       updateChatHeader();
     }
     return;
   }
 
   if (data.type === 'message') {
-    const agentId = data.agentId || extractAgentId(data.from);
-    if (!agentId || typeof data.content !== 'string') return;
-    addMessage(agentId, 'agent', data.content);
+    const appId = data.appId || '';
+    if (!appId || typeof data.content !== 'string') return;
+    addMessage(appId, 'agent', data.content);
     renderAgentList();
     return;
   }
 
   if (data.type === 'history') {
     const messages = data.messages && typeof data.messages === 'object' ? data.messages : {};
-    for (const [agentId, agentMessages] of Object.entries(messages)) {
-      if (!Array.isArray(agentMessages)) continue;
-      state.messages[agentId] = agentMessages
+    for (const [appId, appMessages] of Object.entries(messages)) {
+      if (!Array.isArray(appMessages)) continue;
+      state.messages[appId] = appMessages
         .filter((message) => message && typeof message.content === 'string')
         .map((message) => ({
-          role: message.role === 'user' ? 'user' : 'agent',
+          role: message.from === 'user' || message.role === 'user' ? 'user' : 'agent',
           content: message.content,
           timestamp: typeof message.timestamp === 'number' ? message.timestamp : Date.now(),
         }));
@@ -143,7 +143,7 @@ function renderAgentList() {
   const list = document.getElementById('agent-list');
   list.innerHTML = '';
 
-  if (state.agents.length === 0) {
+  if (state.apps.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'empty-state';
     empty.textContent = '暂无可用 Agent';
@@ -151,15 +151,15 @@ function renderAgentList() {
     return;
   }
 
-  state.agents.forEach((agent) => {
-    const agentId = agent.agentId || '';
-    const name = agent.name || agentId;
-    const lastMessage = getLastMessage(agentId);
-    const unreadCount = state.unread[agentId] || 0;
+  state.apps.forEach((app) => {
+    const appId = app.appId || '';
+    const name = app.name || appId;
+    const lastMessage = getLastMessage(appId);
+    const unreadCount = state.unread[appId] || 0;
 
     const card = document.createElement('div');
     card.className = 'agent-card';
-    card.addEventListener('click', () => switchAgent(agentId));
+    card.addEventListener('click', () => switchApp(appId));
 
     const avatar = document.createElement('div');
     avatar.className = 'agent-avatar';
@@ -174,7 +174,7 @@ function renderAgentList() {
 
     const id = document.createElement('div');
     id.className = 'agent-id';
-    id.textContent = agentId;
+    id.textContent = appId;
 
     const preview = document.createElement('div');
     preview.className = 'agent-preview';
@@ -196,11 +196,11 @@ function renderAgentList() {
   });
 }
 
-function switchAgent(agentId) {
-  if (!agentId) return;
+function switchApp(appId) {
+  if (!appId) return;
 
-  state.activeAgentId = agentId;
-  state.unread[agentId] = 0;
+  state.activeAppId = appId;
+  state.unread[appId] = 0;
   updateChatHeader();
   renderMessages();
   renderAgentList();
@@ -211,7 +211,7 @@ function renderMessages() {
   const list = document.getElementById('message-list');
   list.innerHTML = '';
 
-  const messages = state.messages[state.activeAgentId] || [];
+  const messages = state.messages[state.activeAppId] || [];
   messages.forEach((message) => {
     const row = document.createElement('div');
     row.className = `message ${message.role === 'user' ? 'user' : 'agent'}`;
@@ -235,24 +235,24 @@ function renderMessages() {
   scrollMessagesToBottom();
 }
 
-function addMessage(agentId, role, content) {
-  state.messages[agentId] = state.messages[agentId] || [];
-  state.messages[agentId].push({ role, content, timestamp: Date.now() });
+function addMessage(appId, role, content) {
+  state.messages[appId] = state.messages[appId] || [];
+  state.messages[appId].push({ role, content, timestamp: Date.now() });
 
-  if (state.activeAgentId === agentId && state.currentScreen === 'chat') {
+  if (state.activeAppId === appId && state.currentScreen === 'chat') {
     renderMessages();
   } else {
-    state.unread[agentId] = (state.unread[agentId] || 0) + 1;
+    state.unread[appId] = (state.unread[appId] || 0) + 1;
   }
 }
 
 function sendMessage() {
   const input = document.getElementById('message-input');
   const text = input.value.trim();
-  if (!text || !state.activeAgentId) return;
+  if (!text || !state.activeAppId) return;
 
   input.value = '';
-  addMessage(state.activeAgentId, 'user', text);
+  addMessage(state.activeAppId, 'user', text);
   renderAgentList();
 
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
@@ -262,7 +262,7 @@ function sendMessage() {
 
   state.ws.send(JSON.stringify({
     type: 'message',
-    agentId: state.activeAgentId,
+    appId: state.activeAppId,
     content: text,
   }));
 }
@@ -296,8 +296,8 @@ function resetState() {
   cleanDisconnect();
   state.userId = '';
   state.userName = '';
-  state.agents = [];
-  state.activeAgentId = null;
+  state.apps = [];
+  state.activeAppId = null;
   state.messages = {};
   state.unread = {};
   state.currentScreen = 'login';
@@ -314,14 +314,14 @@ function clearReconnectTimer() {
 }
 
 function updateChatHeader() {
-  const agent = state.agents.find((item) => item.agentId === state.activeAgentId);
-  const name = agent ? agent.name || agent.agentId : state.activeAgentId || '';
+  const app = state.apps.find((item) => item.appId === state.activeAppId);
+  const name = app ? app.name || app.appId : state.activeAppId || '';
   document.getElementById('chat-agent-avatar').textContent = getAvatarText(name);
   document.getElementById('chat-agent-name').textContent = name;
 }
 
-function getLastMessage(agentId) {
-  const messages = state.messages[agentId] || [];
+function getLastMessage(appId) {
+  const messages = state.messages[appId] || [];
   return messages.length > 0 ? messages[messages.length - 1] : null;
 }
 
@@ -329,11 +329,6 @@ function getAvatarText(name) {
   const chars = Array.from(String(name || '?').trim());
   const emoji = chars.find((char) => /\p{Emoji_Presentation}/u.test(char));
   return emoji || (chars[0] || '?').toUpperCase();
-}
-
-function extractAgentId(from) {
-  if (typeof from !== 'string') return '';
-  return from.startsWith('agent:') ? from.slice('agent:'.length) : from;
 }
 
 function formatTime(timestamp) {

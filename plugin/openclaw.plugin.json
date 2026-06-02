@@ -17,20 +17,19 @@
         "properties": {
           "enabled": { "type": "boolean" },
           "serverUrl": { "type": "string", "description": "Chat Server WebSocket URL" },
-          "pluginId": { "type": "string" },
-          "agents": {
-            "type": "array",
-            "items": {
+          "accounts": {
+            "type": "object",
+            "description": "Map of accountId -> {appId, secret, serverUrl}",
+            "additionalProperties": {
               "type": "object",
               "properties": {
-                "agentId": { "type": "string" },
-                "name": { "type": "string" }
+                "appId": { "type": "string" },
+                "secret": { "type": "string" },
+                "serverUrl": { "type": "string" }
               },
-              "required": ["agentId"]
+              "required": ["appId", "secret"]
             }
-          },
-          "allowFrom": { "type": "array", "items": { "type": "string" } },
-          "dmPolicy": { "type": "string", "enum": ["open", "allowlist", "pairing"] }
+          }
         }
       }
     }
