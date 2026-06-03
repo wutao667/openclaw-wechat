@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import bcrypt from 'bcryptjs';
+import Database from 'better-sqlite3';
 import jwt from 'jsonwebtoken';
 
 const PORT = Number(process.env.PORT || 3100);
@@ -14,15 +15,27 @@ const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, 'public');
 const JWT_SECRET = process.env.ADMIN_JWT_SECRET || crypto.randomBytes(32).toString('hex');
 const APPS_FILE = path.join(__dirname, 'apps.json');
+const DB_FILE = process.env.WEBCHAT_DB_FILE || path.join(__dirname, 'webchat.sqlite');
 
 const browsers = new Map();
 const browserMeta = new WeakMap();
 const plugins = new Map();
 const pluginMeta = new WeakMap();
 const appRegistry = new Map();
-const messageHistory = new Map();
 const heartbeatMeta = new WeakMap();
 const HISTORY_LIMIT = 100;
+const db = initDatabase();
+const statements = prepareStatements(db);
+const appendHistoryTransaction = db.transaction((message) => {
+  statements.insertMessage.run(message);
+  statements.pruneConversation.run(
+    message.userId,
+    message.appId,
+    message.userId,
+    message.appId,
+    HISTORY_LIMIT,
+  );
+});
 
 const contentTypes = {
   '.html': 'text/html; charset=utf-8',
@@ -78,6 +91,70 @@ const pluginWss = new WebSocketServer({ noServer: true });
 
 initAppsFile();
 loadAppRegistry();
+
+function initDatabase() {
+  const database = new Database(DB_FILE);
+  database.pragma('journal_mode = WAL');
+  database.pragma('foreign_keys = ON');
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      app_id TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('user', 'agent')),
+      content TEXT NOT NULL,
+      timestamp INTEGER NOT NULL,
+      message_id TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_messages_user_app_time
+      ON messages (user_id, app_id, timestamp DESC, id DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_messages_user_time
+      ON messages (user_id, timestamp DESC, id DESC);
+  `);
+  return database;
+}
+
+function prepareStatements(database) {
+  return {
+    insertMessage: database.prepare(`
+      INSERT INTO messages (user_id, app_id, role, content, timestamp, message_id)
+      VALUES (@userId, @appId, @from, @content, @timestamp, @messageId)
+    `),
+    pruneConversation: database.prepare(`
+      DELETE FROM messages
+      WHERE user_id = ? AND app_id = ?
+        AND id NOT IN (
+          SELECT id
+          FROM messages
+          WHERE user_id = ? AND app_id = ?
+          ORDER BY timestamp DESC, id DESC
+          LIMIT ?
+        )
+    `),
+    historyForUser: database.prepare(`
+      SELECT app_id, role, content, timestamp, message_id
+      FROM (
+        SELECT
+          app_id,
+          role,
+          content,
+          timestamp,
+          message_id,
+          id,
+          ROW_NUMBER() OVER (
+            PARTITION BY app_id
+            ORDER BY timestamp DESC, id DESC
+          ) AS row_number
+        FROM messages
+        WHERE user_id = ?
+      )
+      WHERE row_number <= ?
+      ORDER BY app_id ASC, timestamp ASC, id ASC
+    `),
+  };
+}
 
 function initAppsFile() {
   if (!fs.existsSync(APPS_FILE)) {
@@ -464,35 +541,27 @@ function removePlugin(ws) {
   broadcastAppList();
 }
 
-function historyKey(userId, appId) {
-  return JSON.stringify([userId, appId]);
-}
-
 function appendHistory({ userId, appId, from, content, messageId }) {
-  const key = historyKey(userId, appId);
-  const messages = messageHistory.get(key) || [];
-  messages.push({
-    from,
-    appId,
-    content,
-    timestamp: Date.now(),
-    messageId,
-  });
-
-  if (messages.length > HISTORY_LIMIT) {
-    messages.splice(0, messages.length - HISTORY_LIMIT);
-  }
-
-  messageHistory.set(key, messages);
+  const timestamp = Date.now();
+  appendHistoryTransaction({ userId, appId, from, content, timestamp, messageId });
 }
 
 function getHistoryForUser(userId) {
   const messagesByApp = {};
+  const rows = statements.historyForUser.all(userId, HISTORY_LIMIT);
 
-  for (const [key, messages] of messageHistory.entries()) {
-    const [historyUserId, appId] = JSON.parse(key);
-    if (historyUserId !== userId) continue;
-    messagesByApp[appId] = messages;
+  for (const row of rows) {
+    if (!messagesByApp[row.app_id]) {
+      messagesByApp[row.app_id] = [];
+    }
+
+    messagesByApp[row.app_id].push({
+      from: row.role,
+      appId: row.app_id,
+      content: row.content,
+      timestamp: row.timestamp,
+      messageId: row.message_id,
+    });
   }
 
   return messagesByApp;
