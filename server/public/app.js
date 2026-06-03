@@ -13,6 +13,8 @@ const state = {
   intentionallyClosed: false,
 };
 
+const LAST_USER_ID_STORAGE_KEY = 'webchat.lastUserId';
+
 function connectWebSocket(userId, userName) {
   if (state.ws) {
     state.ws.skipReconnect = true;
@@ -24,6 +26,7 @@ function connectWebSocket(userId, userName) {
   state.userId = userId;
   state.userName = userName;
   state.intentionallyClosed = false;
+  saveLastUserId(userId);
 
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${protocol}//${location.host}/ws`);
@@ -418,6 +421,7 @@ function cleanDisconnect() {
 
 function resetState() {
   cleanDisconnect();
+  clearLastUserId();
   state.userId = '';
   state.userName = '';
   state.apps = [];
@@ -478,7 +482,43 @@ async function websocketMessageToText(data) {
   return String(data);
 }
 
+function saveLastUserId(userId) {
+  try {
+    localStorage.setItem(LAST_USER_ID_STORAGE_KEY, userId);
+  } catch (error) {
+    console.warn('failed to save last user id:', error);
+  }
+}
+
+function clearLastUserId() {
+  try {
+    localStorage.removeItem(LAST_USER_ID_STORAGE_KEY);
+  } catch (error) {
+    console.warn('failed to clear last user id:', error);
+  }
+}
+
+function prefillLastUserId() {
+  let lastUserId = '';
+  try {
+    lastUserId = localStorage.getItem(LAST_USER_ID_STORAGE_KEY) || '';
+  } catch (error) {
+    console.warn('failed to read last user id:', error);
+  }
+
+  if (!lastUserId) return;
+
+  const input = document.getElementById('username-input');
+  input.value = lastUserId;
+  requestAnimationFrame(() => {
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+  prefillLastUserId();
+
   document.getElementById('login-btn').addEventListener('click', () => {
     const username = document.getElementById('username-input').value.trim();
     if (!username) {
