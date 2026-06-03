@@ -2,6 +2,16 @@
 
 通过浏览器直接和 OpenClaw Agent 对话，不依赖飞书、企微等第三方 IM 平台。
 
+## 特性
+
+- **零第三方依赖**：摆脱 IM 平台限制，浏览器即入口，隐私安全自主可控
+- **单实例多 Agent 接入**：一个 Chat Server 和一个 Gateway 实例即可承载多个 Agent，各自独立工作
+- **多用户会话隔离**：基于 `{userId}:{agentId}` 的 session 模型，不同用户之间的会话完全隔离，互不可见
+- **消息实时推送**：基于 WebSocket 长连接，消息实时到达，支持打字中状态（typing indicator）
+- **多 OpenClaw 实例接入**：多个 Gateway 可同时连接同一个 Chat Server，统一管理接入入口
+- **可视化后台管理**：内置 Admin Dashboard，可视化创建和管理 App 身份，无需手写配置文件
+- **开箱即用的部署体验**：`npx` 一键启动 Server，`openclaw plugins install` 安装 Plugin，分钟级上线
+
 ## 架构
 
 ```
